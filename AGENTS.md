@@ -1,9 +1,40 @@
 # zen-proxy — working notes
 
-Single-file proxy (`zen-proxy.mjs`, ~4700 lines) that makes a coding agent's
-traffic indistinguishable from the OpenCode CLI so the free tier serves it.
+A local proxy that makes a coding agent's traffic indistinguishable from the
+OpenCode CLI so the free tier serves it. `zen-proxy.mjs` is the entry point
+(~110 lines); the implementation lives in `src/`.
+
+```
+src/util.mjs       helpers, small constants
+src/config.mjs     defaults, config file, the live `config` binding
+src/log.mjs        the log buffer the dashboard tails
+src/catalogs.mjs   models.json, agent-tools.json, agent-preamble.txt
+src/preamble.mjs   harness preamble assembly
+src/tls.mjs        wreq-js transport + egress pool
+src/net.mjs        body reader, JSON replies, credentials
+src/session.mjs    session minting / translation / identity pool
+src/headers.mjs    the v2 wire headers
+src/bridge.mjs     opencode tool manifest <-> caller tools
+src/model.mjs      model resolution + endpoint family
+src/retry.mjs      upstream error classification
+src/stats.mjs      counters and per-request logging
+src/wire/          Anthropic and Responses translation
+src/stream.mjs     the streaming relays
+src/sync.mjs       catalog sync, probes, auto-UA
+src/routes/        request handlers
+src/router.mjs     URL -> handler
+src/server.mjs     HTTP server and shutdown
+src/index.mjs      the public surface (tests import this)
+```
+
+The import graph is acyclic and one-directional: `util`/`log` are leaves,
+`config` sits above the catalogs, and everything request-shaped sits above it.
+If you add a module, keep it that way — a cycle here means a live binding gets
+read before it is assigned.
+
 Tests: `node --test test/zen-proxy.test.mjs` (set `ZEN_TLS=0` in tests — they stub
 `globalThis.fetch`, and the wreq transport would bypass the stub).
+`npm run check` is the fast syntax + import check.
 
 **The case study for everything below is
 [`docs/kb-opencode-free-429.md`](docs/kb-opencode-free-429.md)** — the gate's

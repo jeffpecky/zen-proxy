@@ -3,17 +3,46 @@
   "version": "1.0.0",
   "description": "Zero-dependency local proxy that unlocks opencode's Zen anonymous free models for any coding agent, over both the OpenAI and Anthropic APIs (Claude Code included)",
   "type": "module",
-  "main": "zen-proxy.mjs",
+  "main": "src/index.mjs",
   "bin": {
     "zen-proxy": "zen-proxy.mjs"
   },
+  "files": [
+    "zen-proxy.mjs",
+    "src/",
+    "models.json",
+    "agent-tools.json",
+    "agent-preamble.txt",
+    "public/",
+    "assets/favicon.png",
+    "assets/logo.png",
+    "assets/logo-128.png",
+    "bin/",
+    "claude/",
+    "install.sh",
+    "install.ps1",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node zen-proxy.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "check": "node --check zen-proxy.mjs && node -e \"import(\\\"./src/index.mjs\\\").then(()=>{}).catch(e=>{console.error(e.message);process.exit(1)})\"",
+    "prepublishOnly": "npm test"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
+  "keywords": [
+    "opencode",
+    "zen",
+    "proxy",
+    "openai",
+    "anthropic",
+    "claude-code",
+    "free-tier",
+    "llm"
+  ],
   "license": "MIT",
   "optionalDependencies": {
     "wreq-js": "^3.2.0"

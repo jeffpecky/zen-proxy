@@ -25,8 +25,11 @@ function Info($m) { Write-Host $m -ForegroundColor Green }
 function Die($m) { Write-Host $m -ForegroundColor Red; exit 1 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  Die "Node.js >= 18 is required. Install from https://nodejs.org then re-run."
+  Die "Node.js >= 20 is required. Install from https://nodejs.org then re-run."
 }
+$nodeMajor = 0
+try { $nodeMajor = [int]((node -p "process.versions.node.split('.')[0]") 2>$null) } catch { $nodeMajor = 0 }
+if ($nodeMajor -lt 20) { Die "Node.js >= 20 is required (found $(node -v)). Install from https://nodejs.org then re-run." }
 
 if ([string]::IsNullOrWhiteSpace($InstallDir) -or $InstallDir -eq "/") {
   Die "Refusing to install into '$InstallDir'"
@@ -79,7 +82,15 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
   Info "Installing the TLS transport (wreq-js)..."
   Push-Location $InstallDir
   try {
-    npm install --omit=dev --no-audit --no-fund --loglevel=error
+    # `npm ci` pins the exact wreq-js build the project was tested against, so
+    # two installs a week apart cannot land on different native addons. Only
+    # when the lockfile shipped; otherwise fall back to a plain install.
+    if (Test-Path (Join-Path $InstallDir "package-lock.json")) {
+      npm ci --omit=dev --no-audit --no-fund --loglevel=error
+      if ($LASTEXITCODE -ne 0) { npm install --omit=dev --no-audit --no-fund --loglevel=error }
+    } else {
+      npm install --omit=dev --no-audit --no-fund --loglevel=error
+    }
     if ($LASTEXITCODE -ne 0) { Write-Host "npm install failed - rerun: cd `"$InstallDir`"; npm install wreq-js" -ForegroundColor Yellow }
   } finally { Pop-Location }
 } else {

@@ -31,7 +31,7 @@ delete process.env.CACHE_MS
 delete process.env.AUTO_SYNC
 delete process.env.AUTO_SYNC_MS
 
-const zp = await import("../zen-proxy.mjs")
+const zp = await import("../src/index.mjs")
 const originalFetch = globalThis.fetch
 after(() => {
   globalThis.fetch = originalFetch
@@ -2341,6 +2341,90 @@ describe("syncModels model-ID validation", () => {
   })
 })
 
+describe("/api/keys (hashed keys admin API)", () => {
+  const keyResp = async (method, { url = "/api/keys", headers, body } = {}) => {
+    const res = mockRes()
+    await zp.handleApiKeys(
+      mockReq({
+        method,
+        url,
+        headers: { "content-type": "application/json", host: "127.0.0.1:8181", ...(headers ?? {}) },
+        _body: body == null ? "" : JSON.stringify(body),
+      }),
+      res,
+    )
+    return res
+  }
+
+  test("requires a credential when one is configured", async () => {
+    zp.saveConfig({ proxyKey: "secret-admin" })
+    const res = await keyResp("GET", { headers: {} })
+    assert.equal(res.state.status, 401)
+  })
+
+  test("mints a key; plaintext shown once; never in config or listing", async () => {
+    zp.saveConfig({ proxyKey: "secret-admin" })
+    const res = await keyResp("POST", { headers: { authorization: "Bearer secret-admin" }, body: { name: "laptop" } })
+    assert.equal(res.state.status, 201)
+    const { key, id } = JSON.parse(res.body)
+    assert.match(key, zp.KEY_RE)
+    const onDisk = fs.readFileSync(process.env.ZEN_PROXY_CONFIG, "utf8")
+    assert.ok(!onDisk.includes(key), "config holds only the hash")
+    const list = await keyResp("GET", { headers: { authorization: "Bearer secret-admin" } })
+    assert.ok(!list.body.includes(key), "listing does not leak the plaintext")
+    assert.equal(JSON.parse(list.body).keys.some((k) => k.id === id), true)
+  })
+
+  test("config PUT cannot clobber apiKeys through the dashboard", async () => {
+    zp.saveConfig({ proxyKey: "secret-admin" })
+    zp.createApiKey("before")
+    const before = zp.config.apiKeys.length
+    const res = mockRes()
+    await zp.handleApiConfig(
+      mockReq({
+        method: "PUT",
+        url: "/api/config",
+        headers: { "content-type": "application/json", host: "127.0.0.1:8181" },
+        _body: JSON.stringify({ apiKeys: [] }),
+      }),
+      res,
+    )
+    assert.equal(zp.config.apiKeys.length, before, "apiKeys untouched by a config save")
+  })
+
+  test("revocation: DELETE /api/keys?id= stops the key at once", async () => {
+    zp.saveConfig({ proxyKey: "secret-admin" })
+    const { key, entry } = zp.createApiKey("gone")
+    const res = await keyResp("DELETE", { url: `/api/keys?id=${entry.id}`, headers: { authorization: "Bearer secret-admin" } })
+    assert.equal(res.state.status, 200)
+    assert.equal(zp.resolveApiKey(key), null)
+    const missing = await keyResp("DELETE", { url: `/api/keys?id=nope`, headers: { authorization: "Bearer secret-admin" } })
+    assert.equal(missing.state.status, 404)
+  })
+})
+
+describe("bootstrap key for public binds (9router parity)", () => {
+  test("loopback with no credentials stays open — nothing minted", () => {
+    zp.saveConfig({ proxyKey: "", apiKeys: [], host: "127.0.0.1" })
+    assert.equal(zp.ensureDefaultKey(), null)
+  })
+
+  test("public bind with no credentials mints one and auth turns on", () => {
+    zp.saveConfig({ proxyKey: "", apiKeys: [], host: "0.0.0.0" })
+    const minted = zp.ensureDefaultKey()
+    assert.match(minted, zp.KEY_RE)
+    assert.equal(zp.config.proxyKey, minted, "persisted for later read-back from the config file")
+    assert.equal(zp.authRequired(), true)
+    assert.equal(zp.authForUpstream(mockReq({})), null, "anonymous requests refused")
+    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${minted}` } })), "Bearer public")
+  })
+
+  test("never mints twice", () => {
+    assert.equal(zp.ensureDefaultKey(), null, "a key already exists")
+  })
+})
+
+
 describe("router / health", () => {
   // /health is cache-only (audit #17): an unauthenticated route must not drive
   // an upstream fetch per poll. The tests warm the cache the way any real
@@ -2526,7 +2610,7 @@ describe("shipped model catalog (models.json)", () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-catalog-"))
       const file = path.join(dir, "models.json")
       if (contents !== null) fs.writeFileSync(file, contents)
-      const script = `import { loadShippedModels } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+      const script = `import { loadShippedModels } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 console.log(JSON.stringify(loadShippedModels()))`
       try {
         return JSON.parse(
@@ -2554,7 +2638,7 @@ describe("model list pinning", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-pin-"))
     const file = path.join(dir, "zen-proxy.json")
     if (cfg !== null) fs.writeFileSync(file, JSON.stringify(cfg))
-    const script = `import { config, isFallbackModelsPinned, loadShippedModels } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+    const script = `import { config, isFallbackModelsPinned, loadShippedModels } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 console.log(JSON.stringify({ pinned: isFallbackModelsPinned(), n: config.fallbackModels.length, shipped: loadShippedModels().length }))`
     try {
       return {
@@ -2611,7 +2695,7 @@ console.log(JSON.stringify({ pinned: isFallbackModelsPinned(), n: config.fallbac
     // fallbackModels back to disk and freeze this install on today's catalog.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-nopin-"))
     const cfg = path.join(dir, "zen-proxy.json")
-    const mod = new URL("../zen-proxy.mjs", import.meta.url).href
+    const mod = new URL("../src/index.mjs", import.meta.url).href
     fs.writeFileSync(cfg, JSON.stringify({ port: 8799 }))
     const script = `import { config, saveConfig, isFallbackModelsPinned } from ${JSON.stringify(mod)}
 saveConfig({ ua: "opencode/9.9.9" })
@@ -2645,7 +2729,7 @@ describe("upstream base URL", () => {
     const file = path.join(dir, "zen-proxy.json")
     if (upstream === null) fs.rmSync(file, { force: true })
     else fs.writeFileSync(file, JSON.stringify({ upstream }))
-    const script = `import { loadConfig } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+    const script = `import { loadConfig } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 console.log(loadConfig().upstream)`
     try {
       return execFileSync(process.execPath, ["--input-type=module", "-e", script], {
@@ -5058,6 +5142,31 @@ describe("proxyKey is the proxy's secret, not a Zen credential (audit #1/#2)", (
     assert.equal(res.state.status, 401)
   })
 
+  test("a minted sk- key authenticates on both routes, a forged one does not", () => {
+    const { key } = zp.createApiKey("t")
+    assert.match(key, zp.KEY_RE)
+    assert.ok(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${key}` } })), "real key accepted")
+    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer sk-${"A".repeat(43)}` } })), null)
+    assert.ok(zp.resolveApiKey(key), "the presented key resolves to its entry")
+    assert.equal(zp.resolveApiKey(key).legacy, undefined, "a minted key is not the legacy proxyKey")
+  })
+
+  test("minted keys hash-only: plaintext never lands in the config", () => {
+    const { key, entry } = zp.createApiKey("leak-test")
+    const onDisk = fs.readFileSync(process.env.ZEN_PROXY_CONFIG, "utf8")
+    assert.ok(!onDisk.includes(key), "the plaintext key is not in the config file")
+    assert.ok(onDisk.includes(entry.hash.slice(0, 16)), "its hash is")
+    zp.revokeApiKey(entry.id)
+    assert.equal(zp.resolveApiKey(key), null, "revocation is immediate")
+  })
+
+  test("listApiKeys exposes no hashes", () => {
+    const { key, entry } = zp.createApiKey("hidden")
+    assert.ok(!JSON.stringify(zp.listApiKeys()).includes(entry.hash))
+    zp.revokeApiKey(entry.id)
+    assert.deepEqual(zp.listApiKeys().find((k) => k.id === entry.id), undefined)
+  })
+
   test("x-api-key still works as a real Zen key when no proxyKey is set", () => {
     zp.saveConfig({ proxyKey: "", defaultZenKey: "" })
     assert.equal(zp.authForUpstream(mockReq({ headers: { "x-api-key": "my-zen-key" } })), "Bearer my-zen-key")
@@ -5749,7 +5858,7 @@ describe("a dashboard save only pins the catalog when it changed (audit #16)", (
 describe("the shipped defaults match the docs (audit #17/#18)", () => {
   const defaults = () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-defaults-"))
-    const script = `import { config } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+    const script = `import { config } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 console.log(JSON.stringify({ cacheMs: config.cacheMs, autoSync: config.autoSync, autoSyncIntervalMs: config.autoSyncIntervalMs }))`
     const env = { ...process.env, ZEN_PROXY_CONFIG: path.join(dir, "zen-proxy.json") }
     delete env.CACHE_MS
@@ -5826,7 +5935,7 @@ describe("the config file is written private (audit #23)", () => {
   test("saveConfig creates it 0600", { skip: isWindows && "POSIX mode bits do not exist on windows" }, () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-mode-"))
     const cfg = path.join(dir, "zen-proxy.json")
-    const script = `import { saveConfig } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+    const script = `import { saveConfig } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 import fs from "node:fs"
 saveConfig({ port: 8791 })
 console.log(JSON.stringify({ mode: (fs.statSync(process.env.ZEN_PROXY_CONFIG).mode & 0o777).toString(8) }))`
@@ -5850,7 +5959,7 @@ console.log(JSON.stringify({ mode: (fs.statSync(process.env.ZEN_PROXY_CONFIG).mo
 describe("a malformed env var does not kill the process at import (audit #24)", () => {
   test("bad JSON and bad numbers fall back to their defaults", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-env-"))
-    const script = `import { config } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+    const script = `import { config } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 console.log(JSON.stringify({
   n: config.fallbackModels.length,
   aliases: config.modelAliases,
@@ -5938,7 +6047,7 @@ describe("/api/test reports the caller the request path reports (audit #32)", ()
 })
 
 describe("server hardening (audit #25)", () => {
-  const src = fs.readFileSync(new URL("../zen-proxy.mjs", import.meta.url), "utf8")
+  const src = fs.readFileSync(new URL("../src/server.mjs", import.meta.url), "utf8")
 
   test("inbound request reception is bounded", () => {
     assert.match(src, /server\.requestTimeout\s*=\s*300_000/, "requestTimeout is not left at 0")

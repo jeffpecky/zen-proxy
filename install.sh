@@ -34,10 +34,10 @@ if [ -z "$INSTALL_DIR" ] || [ "$INSTALL_DIR" = "/" ]; then
 fi
 
 command -v curl >/dev/null 2>&1 || die "curl is required. Install it first."
-command -v node >/dev/null 2>&1 || die "Node.js >= 18 is required. See https://nodejs.org"
+command -v node >/dev/null 2>&1 || die "Node.js >= 20 is required. See https://nodejs.org"
 
 NODE_MAJOR=$(node -e 'console.log(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
-if [ "$NODE_MAJOR" -lt 18 ]; then die "Node.js >= 18 is required (found $(node -v)). See https://nodejs.org"; fi
+if [ "$NODE_MAJOR" -lt 20 ]; then die "Node.js >= 20 is required (found $(node -v)). See https://nodejs.org"; fi
 
 # The free tier fingerprints the client's TLS ClientHello: Node's native stack
 # is bucketed `429 FreeUsageLimitError` even for perfectly agent-shaped
@@ -45,13 +45,27 @@ if [ "$NODE_MAJOR" -lt 18 ]; then die "Node.js >= 18 is required (found $(node -
 # ClientHello from inside the process, so the anonymous tier works under node
 # too. It is optional at runtime — a failed install degrades to native fetch
 # (BYOK only), it does not break the proxy.
-if command -v npm >/dev/null 2>&1; then
+#
+# This runs AFTER the copy, not before: it used to sit above `mkdir` and the
+# file copy, so `cd "$INSTALL_DIR"` failed on a fresh machine, `npm` never ran,
+# and every new install silently started without the TLS transport.
+install_tls_transport() {
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "npm not found — install wreq-js by hand for anonymous access: cd \"$INSTALL_DIR\" && npm install wreq-js"
+    return
+  fi
   info "Installing the TLS transport (wreq-js)…"
+  # `npm ci` when the lockfile shipped with this tree: it installs exactly the
+  # wreq-js build the project was tested against, so two installs a week apart
+  # cannot end up on different native addons. Falls back to `npm install` for a
+  # tree without a lockfile (an older checkout, or a hand-copied directory).
+  if [ -f "$INSTALL_DIR/package-lock.json" ] \
+      && ( cd "$INSTALL_DIR" && npm ci --omit=dev --no-audit --no-fund --loglevel=error ); then
+    return
+  fi
   ( cd "$INSTALL_DIR" && npm install --omit=dev --no-audit --no-fund --loglevel=error ) \
     || warn "wreq-js install failed — anonymous free-tier requests will be 429'd; rerun: cd \"$INSTALL_DIR\" && npm install wreq-js"
-else
-  warn "npm not found — install wreq-js by hand for anonymous access: cd \"$INSTALL_DIR\" && npm install wreq-js"
-fi
+}
 
 if ! command -v bun >/dev/null 2>&1; then
   info "NOTE: bun not found. Not required any more (wreq-js carries the ClientHello),"
@@ -100,6 +114,9 @@ rm -f "$CFG_BAK"
 if [ ! -f "$INSTALL_DIR/zen-proxy.mjs" ]; then
   die "zen-proxy.mjs not found after install — check ZEN_PROXY_REPO"
 fi
+
+# Now that the tree exists. See install_tls_transport() for why this is here.
+install_tls_transport
 
 if [ ! -f "$INSTALL_DIR/zen-proxy.json" ]; then
   printf '{ "host": "127.0.0.1", "port": %s }\n' "$PORT" > "$INSTALL_DIR/zen-proxy.json"
