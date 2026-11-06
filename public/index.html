@@ -269,9 +269,6 @@ label::before { content:"▸ "; color:var(--coral) }
 .formgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:0 24px }
 textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:12.5px }
 .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap }
-.copyrow { display:flex; gap:8px; align-items:center }
-.innerpanel { border:1px solid var(--line); border-radius:10px; padding:16px; margin:16px 0; background:rgba(255,255,255,.02) }
-.copybox { border:1px solid #3a4a26; border-radius:10px; padding:14px; margin:0 0 16px; background:#1d2417 }
 .row .grow { flex:1 }
 .checkbox { display:flex; align-items:center; gap:10px; margin-top:18px }
 .checkbox input { width:auto; accent-color:var(--coral) }
@@ -341,7 +338,7 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
   <div class="box">
     <img src="/assets/logo-128.png" alt="zen-proxy logo" style="width:56px;height:56px;border-radius:14px;border:2px solid var(--acid);box-shadow:3px 3px 0 var(--coral);margin-bottom:16px;object-fit:cover">
     <h2>Locked 🔒</h2>
-    <p>This dashboard is protected. Enter the admin password (<code>adminPassword</code> / <code>ADMIN_PASSWORD</code>).</p>
+    <p>This dashboard is protected. Enter the admin password (<code>adminPassword</code>) to log in.</p>
     <input type="password" id="authKey" placeholder="admin key" autocomplete="off">
     <div class="row" style="margin-top:20px">
       <button class="primary grow" onclick="submitAuth()">Unlock</button>
@@ -431,25 +428,6 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
           </div>
           <label>Timeout (ms)</label><input id="cfgTimeout" type="number">
         </div>
-      </div>
-      <div class="innerpanel">
-        <h2><span class="hh">Client keys</span><span class="sticker acid" style="transform:none">shown once</span></h2>
-        <p class="hint" style="margin-bottom:16px">Keys your agents use to call models (<code>Authorization: Bearer sk-…</code> or <code>x-api-key</code>). Stored hashed — shown once at mint, then never again. These are <b>not</b> a dashboard login: the admin password above is what opens this UI.</p>
-        <div class="row" style="margin:0 0 16px;gap:12px">
-          <input class="grow" id="newKeyName" placeholder="name it, e.g. laptop or ci-runner" onkeydown="if(event.key==='Enter')mintKey()">
-          <button class="primary" onclick="mintKey()">+ Mint key</button>
-          <button onclick="loadKeys()">⟳ Refresh</button>
-        </div>
-        <div class="copybox" id="mintedPanel" style="display:none">
-          <div style="font-weight:700;color:var(--acid);font-size:12px;letter-spacing:.08em;margin-bottom:8px">COPY THIS KEY NOW — shown only once</div>
-          <div class="copyrow"><code class="grow mono" id="mintedKey" style="word-break:break-all"></code><button onclick="copyMinted()">Copy</button></div>
-          <div class="hint" style="margin-top:10px">Point a client at <code>http://&lt;host&gt;:8181/v1</code> with this as its API key. It is never shown or stored again — mint a replacement if it is lost.</div>
-        </div>
-        <table id="keyTable">
-          <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
-          <tbody><tr><td colspan="4" class="empty" id="keyEmpty">no client keys — the proxy key / anonymous tier is the only credential.</td></tr></tbody>
-        </table>
-        <div class="hint" style="margin-top:12px" id="keysHint"></div>
       </div>
       <label>Fallback models (json array — tried in order on 429/5xx)</label>
       <textarea id="cfgFallback"></textarea>
@@ -976,73 +954,7 @@ function jsStr(s) {
 }
 
 async function refreshAll() {
-  try { await refreshStatus(); await refreshModels(); await loadKeys() } catch (e) { if (e.message === "unauthorized") showAuth() }
-}
-
-// ---- client keys ------------------------------------------------------------
-// The minted key exists in exactly one place: the POST response. Copy it now or
-// mint a replacement later — the server only ever holds the hash.
-let mintedOnce = ""
-
-async function loadKeys() {
-  try {
-    const data = await api("/api/keys")
-    const tbody = $("keyTable").querySelector("tbody")
-    tbody.innerHTML = ""
-    const keys = data.keys || []
-    $("keyEmpty").style.display = keys.length ? "none" : ""
-    for (const k of keys) {
-      const tr = document.createElement("tr")
-      tr.innerHTML = `<td style="max-width:320px;overflow-wrap:anywhere">${k.name ? esc(k.name) : "<code>" + esc(k.id) + "</code>"}</td>` +
-        `<td>${k.createdAt ? new Date(k.createdAt).toLocaleString() : "–"}</td>` +
-        `<td>${k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "never"}</td>` +
-        `<td><button onclick="revokeKey('${esc(k.id)}')">Revoke</button></td>`
-      tbody.appendChild(tr)
-    }
-    $("keysHint").innerHTML = data.authRequired
-      ? "Auth is on. A minted key is one the fleet shares: any of them works on any client, and revoking one only locks out whoever holds it."
-      : "Auth is off (loopback, no credentials). Mint a key to lock this proxy down."
-  } catch { /* unauthorized already routes to showAuth */ }
-}
-
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]))
-}
-
-async function mintKey() {
-  const name = $("newKeyName").value.trim()
-  try {
-    const out = await api("/api/keys", { method: "POST", body: JSON.stringify({ name }) })
-    mintedOnce = out.key
-    $("newKeyName").value = ""
-    await loadKeys()
-    $("mintedPanel").style.display = "block"
-    $("mintedKey").textContent = mintedOnce
-    toast("Key minted — copy it before you navigate away")
-  } catch (e) {
-    if (e.message !== "unauthorized") toast("Mint failed: " + e.message, "bad")
-  }
-}
-
-function copyMinted() {
-  navigator.clipboard?.writeText(mintedOnce).then(() => toast("Copied to clipboard")).catch(() => {
-    // Clipboard is often refused for file:// or unanchored origins; select instead.
-    const r = document.createRange(); r.selectNodeContents($("mintedKey"))
-    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r)
-    document.execCommand("copy")
-    toast("Copied to clipboard")
-  })
-}
-
-async function revokeKey(id) {
-  if (!confirm("Revoke this key? Callers holding it get 401 immediately.")) return
-  try {
-    await api(`/api/keys?id=${encodeURIComponent(id)}`, { method: "DELETE" })
-    toast("Key revoked")
-    await loadKeys()
-  } catch (e) {
-    if (e.message !== "unauthorized") toast("Revoke failed: " + e.message, "bad")
-  }
+  try { await refreshStatus(); await refreshModels() } catch (e) { if (e.message === "unauthorized") showAuth() }
 }
 
 if (key) {
