@@ -2436,6 +2436,20 @@ describe("bootstrap key for public binds (9router parity)", () => {
 })
 
 
+describe("config hot-reload is wired, not just defined (crash regression)", () => {
+  test("the watcher can reach reloadConfig — it died with ReferenceError before", () => {
+    // `startConfigWatch` called reloadConfig() without importing it, so the
+    // process exited the first time anything wrote the config (minting a key
+    // from the dashboard did it). A live watcher cannot be opened in-process
+    // here — fs.watch keeps the event loop alive — so assert the wiring the
+    // failure came from: the server module reaches config's reloader.
+    assert.equal(typeof zp.startConfigWatch, "function")
+    const src = fs.readFileSync(new URL("../src/server.mjs", import.meta.url), "utf8")
+    assert.match(src, /import\s*\{[^}]*reloadConfig[^}]*\}\s*from\s*"\.\/config\.mjs"/, "reloadConfig must be imported where it is called")
+    assert.match(src, /reloadConfig\(\)/, "and still be called by the watcher")
+  })
+})
+
 describe("router / health", () => {
   // /health is cache-only (audit #17): an unauthenticated route must not drive
   // an upstream fetch per poll. The tests warm the cache the way any real

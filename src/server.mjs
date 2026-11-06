@@ -2,7 +2,7 @@
 import fs from "node:fs"
 import http from "node:http"
 import path from "node:path"
-import { CONFIG_PATH, config } from "./config.mjs"
+import { CONFIG_PATH, config, reloadConfig } from "./config.mjs"
 import { log } from "./log.mjs"
 import { router } from "./router.mjs"
 import { scheduleSync, scheduleUA, syncTimer, uaTimer } from "./sync.mjs"

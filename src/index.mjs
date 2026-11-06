@@ -123,3 +123,4 @@ export {
   handleLogs,
 } from "./routes/admin.mjs"
 export { router } from "./router.mjs"
+export { startConfigWatch } from "./server.mjs"
