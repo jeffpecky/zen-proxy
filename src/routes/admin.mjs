@@ -147,7 +147,6 @@ async function handleApiConfig(req, res) {
       cleaned.requireApiKey = toBool(cleaned.requireApiKey, config.requireApiKey)
       if (!Array.isArray(cleaned.proxyUrls)) cleaned.proxyUrls = config.proxyUrls
       else cleaned.proxyUrls = cleaned.proxyUrls.filter((u) => typeof u === "string" && u.trim())
-      if (cleaned.adminPassword === "••••••••") cleaned.adminPassword = config.adminPassword
       if (cleaned.probeAuth != null && !["auto", "key", "anonymous"].includes(String(cleaned.probeAuth))) {
         cleaned.probeAuth = "auto"
       }

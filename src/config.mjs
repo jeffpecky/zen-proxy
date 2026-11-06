@@ -233,7 +233,11 @@ function maskKey(k) {
 
 function sanitize(cfg) {
   const out = { ...cfg }
-  if (out.adminPassword) out.adminPassword = "••••••••"
+  // adminPassword is NOT masked. Masking it only hid the one copy the operator
+  // needs — a boot-generated password was printed once and then unreadable
+  // forever — and it protects nothing: /api/config already sits behind
+  // adminAuth, so whoever can read this response already knows the password.
+  // The Zen key stays masked: it is a THIRD-PARTY secret, not one of ours.
   if (out.defaultZenKey) out.defaultZenKey = maskKey(out.defaultZenKey)
   // The hashes are internal: returning them lets a leaked dashboard response be
   // attacked offline, and nothing in the UI needs them. Ids and names suffice.

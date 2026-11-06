@@ -414,18 +414,18 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
           <label>Port</label><input id="cfgPort" type="number">
           <label>Upstream url</label><input id="cfgUpstream" type="text">
           <label>User-agent (the unlock)</label><input id="cfgUa" type="text">
-        </div>
-        <div>
-          <label>Default model <span class="hint">(empty = auto-pick healthy free model)</span></label><input id="cfgDefault" type="text">
-          <label>Admin password (dashboard login; empty = open on loopback)</label>
-          <input id="cfgAdminPassword" type="text" autocomplete="new-password" spellcheck="false">
-          <div class="hint" id="adminPwHint" style="min-height:16px;margin-top:4px"></div>
           <label>Zen key (byok, optional)</label><input id="cfgZenKey" type="password" autocomplete="new-password">
           <div class="row" style="gap:8px;margin-top:2px">
             <button type="button" class="primary" onclick="testZenKey()" style="font-size:11px;padding:6px 10px">Test key</button>
             <span class="hint mono" id="cfgAuth"></span>
             <span class="hint" id="zenKeyHint" style="min-height:16px"></span>
           </div>
+        </div>
+        <div>
+          <label>Default model <span class="hint">(empty = auto-pick healthy free model)</span></label><input id="cfgDefault" type="text">
+          <label>Admin password (dashboard login; empty = open)</label>
+          <input id="cfgAdminPassword" type="text" autocomplete="new-password" spellcheck="false">
+          <div class="hint" id="adminPwHint" style="min-height:16px;margin-top:4px"></div>
           <label>Timeout (ms)</label><input id="cfgTimeout" type="number">
         </div>
       </div>
@@ -764,13 +764,13 @@ async function populateConfigForm() {
   $("cfgUa").value = config.ua
   $("cfgDefault").value = config.defaultModel
   $("cfgDefault").placeholder = "(auto)"
-  // Prefill with the mask rather than blank: a blank field reads as "no password
-  // set" when one is, and the generated value is only ever printed once at boot.
-  // Saving the mask back means "keep the current password" (server-side check).
+  // Show the real value: a boot-generated password exists only in the log, and
+  // this page is already behind that same password. Clearing the field and
+  // saving turns the login off.
   $("cfgAdminPassword").value = config.adminPassword || ""
   $("adminPwHint").textContent = config.adminPassword
-    ? "stored — replace it here to change it (the value is masked; the real one is only printed at first boot)"
-    : "not set — the dashboard is open on loopback only"
+    ? "this is the login password — edit it here to change it"
+    : "not set — the dashboard is open (loopback only); set one to lock it"
   $("cfgZenKey").value = savedZenKeyMasked
   $("cfgTimeout").value = config.timeoutMs
   $("cfgFallback").value = JSON.stringify(config.fallbackModels, null, 2)

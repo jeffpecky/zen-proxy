@@ -2227,14 +2227,15 @@ describe("handleModels", () => {
 })
 
 describe("handleApiConfig", () => {
-  test("GET returns sanitized config (keys masked)", async () => {
+  test("GET returns the admin password but masks the Zen key", async () => {
     zp.saveConfig({ adminPassword: "secret-admin", defaultZenKey: "zen-abcdefghijklmnop" })
     const res = mockRes()
     await zp.handleApiConfig(mockReq({ method: "GET", headers: { authorization: "Bearer secret-admin" } }), res)
     const data = JSON.parse(res.body)
-    assert.equal(data.config.adminPassword, "••••••••")
-    assert.ok(!data.config.adminPassword.includes("secret"))
-    assert.ok(data.config.defaultZenKey.includes("••••••"))
+    // Behind adminAuth, so the caller already knows it — and it is the only
+    // readable copy of a boot-generated password.
+    assert.equal(data.config.adminPassword, "secret-admin")
+    assert.ok(data.config.defaultZenKey.includes("••••••"), "the third-party Zen key stays masked")
   })
 
   test("PUT ignores unknown keys", async () => {
@@ -2246,16 +2247,20 @@ describe("handleApiConfig", () => {
     assert.equal(zp.config.port, before)
   })
 
-  test("PUT rejects masked adminPassword (keeps existing)", async () => {
+  test("PUT sets a new admin password", async () => {
     zp.saveConfig({ adminPassword: "real-key-123" })
     const req = mockReq({
       method: "PUT",
       headers: { authorization: "Bearer real-key-123", "content-type": "application/json" },
-      _body: JSON.stringify({ adminPassword: "••••••••", port: zp.config.port }),
+      _body: JSON.stringify({ adminPassword: "brand-new-pass", port: zp.config.port }),
     })
     const res = mockRes()
     await zp.handleApiConfig(req, res)
-    assert.equal(zp.config.adminPassword, "real-key-123")
+    assert.equal(zp.config.adminPassword, "brand-new-pass")
+    // ...and the old one stops working on the admin API.
+    const stale = mockRes()
+    await zp.handleStatus(mockReq({ method: "GET", url: "/api/status", headers: { authorization: "Bearer real-key-123" } }), stale)
+    assert.equal(stale.state.status, 401)
   })
 
   test("PUT rejects masked defaultZenKey (keeps existing)", async () => {
@@ -2325,9 +2330,12 @@ describe("sanitize / maskKey", () => {
     assert.ok(long.includes("••••••"))
   })
 
-  test("sanitize masks adminPassword and defaultZenKey", () => {
+  test("sanitize returns the admin password but masks the Zen key", () => {
+    // The admin password must stay readable: it is generated at boot, printed
+    // once, and this response is already behind it. The Zen key is a
+    // third-party secret and keeps its mask.
     const out = zp.sanitize({ adminPassword: "pk-1", defaultZenKey: "zen-2" })
-    assert.equal(out.adminPassword, "••••••••")
+    assert.equal(out.adminPassword, "pk-1")
     assert.equal(out.defaultZenKey, "••••••••")
   })
 })
