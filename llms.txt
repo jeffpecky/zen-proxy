@@ -17,7 +17,7 @@ opencode's Zen gateway serves its free models (`big-pickle`, `space-bunny-free`,
 - The legacy `https://opencode.ai/zen/v1` and `/inference/v1` bases answer `/models` but the served agent base is `https://opencode.ai/inference/openai/v1`.
 - Most agents force their own UA and system prompt, so they cannot use the free tier directly.
 
-zen-proxy solves this by running under bun, injecting the CLI's full wire identity, prepending the captured harness preamble to every request, attaching OpenCode's v2 manifest and renaming the resulting calls back, then re-exposing everything on `http://127.0.0.1:8787/v1` — as either a standard OpenAI API or a standard Anthropic Messages API.
+zen-proxy solves this by speaking Bun’s TLS ClientHello through wreq-js, injecting the CLI's full wire identity, prepending the captured harness preamble to every request, attaching OpenCode's v2 manifest and renaming the resulting calls back, then re-exposing everything on `http://127.0.0.1:8181/v1` — as either a standard OpenAI API or a standard Anthropic Messages API.
 
 ## Key facts
 
@@ -25,7 +25,7 @@ zen-proxy solves this by running under bun, injecting the CLI's full wire identi
 - **Auth**: anonymous via `Bearer public`; BYOK via `defaultZenKey` config or an `x-zen-key` / real bearer token. If a 429 says the identity's *own* free allowance is spent (the "Free usage limit reached" upgrade pitch, not the shared-bucket cooldown), that same attempt is retried once under the configured key before the chain moves on.
 - **Session & identity**: the free tier tracks usage per session+project pair, not per key — upstream reads one pair as one CLI conversation in one project. The proxy mints the whole pair per caller (CLI-shaped session id + CLI-derived project hash, keyed by source IP + UA family: two different agents on one machine are two callers, a version bump is not a new one) and rotates both halves together every 30 minutes. A client that brings its own `x-opencode-session` / `x-opencode-project` is forwarded untouched; `injectSession: false` disables injection. Nothing about IPs is rotated — `trustForwarded` stays in charge of how real IPs travel, and per-IP usage accounting is left exactly as it is.
 - **Quota**: the free tier is per-IP; the proxy forwards the real client IP (`x-real-ip`/`x-forwarded-for` when `trustForwarded` is on), but for local/loopback clients it omits `x-real-ip` so upstream counts your machine's real IP — matching opencode direct usage and avoiding a bogus shared `127.0.0.1` bucket. Do not abuse or rotate IPs.
-- **Anthropic API**: `POST /v1/messages` (+ `/v1/messages/count_tokens`) are translated to the target model's endpoint family and back, streaming included, so Claude Code can point at it via `ANTHROPIC_BASE_URL=http://127.0.0.1:8787` (the `zen-claude` command sets this for you). Because the free tier only accepts requests carrying opencode's own tools and its harness system text, the proxy attaches opencode's full manifest ahead of the caller's tools and prepends the harness preamble ahead of the caller's system prompt (everything the client sent still follows, nothing is dropped).
+- **Anthropic API**: `POST /v1/messages` (+ `/v1/messages/count_tokens`) are translated to the target model's endpoint family and back, streaming included, so Claude Code can point at it via `ANTHROPIC_BASE_URL=http://127.0.0.1:8181` (the `zen-claude` command sets this for you). Because the free tier only accepts requests carrying opencode's own tools and its harness system text, the proxy attaches opencode's full manifest ahead of the caller's tools and prepends the harness preamble ahead of the caller's system prompt (everything the client sent still follows, nothing is dropped).
 - **Model fallback**: reads the free-model list from `models.json`, which a GitHub Action keeps current from opencode's public catalog every 6 hours. Tries them in order on 429/5xx **and** on model-level 4xx (`Model is unavailable`, `FreeTierError`, geo-blocked or unsupported models), honors `retry-after`.
 - **Claude Code, one command**: run `zen-claude`. There is no separate step — it starts the proxy if it is not already running, waits for it to answer, registers every live free Zen model in Claude Code's `/model` picker, launches Claude Code, and stops the proxy again when you exit. The installer puts `zen-claude` on your PATH (Linux/macOS and Windows alike, alongside `zen-proxy`; `claude-zen` is linked too as an alias). If Claude Code is not installed it says so, prints `npm install -g @anthropic-ai/claude-code`, and exits without starting a proxy. It passes `claude --settings <file>` rather than exported env, because Claude Code reads env from `~/.claude/settings.json` and that wins over your shell; your existing Claude Code config is never modified.
 - **Endpoint routing**: Zen serves each model on either `/v1/chat/completions` or `/v1/responses`. `responsesModels` lists the patterns (`*` allowed); the proxy translates requests, tool calls, reasoning and SSE streams in both directions, so any OpenAI-compatible client works either way.
@@ -40,13 +40,13 @@ zen-proxy solves this by running under bun, injecting the CLI's full wire identi
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/12errh/zen-proxy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jeffpecky/zen-proxy/main/install.sh | bash
 
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/12errh/zen-proxy/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/jeffpecky/zen-proxy/main/install.ps1 | iex
 ```
 
-Or clone and run: `git clone https://github.com/12errh/zen-proxy.git && cd zen-proxy && bun zen-proxy.mjs`
+Or clone and run: `git clone https://github.com/jeffpecky/zen-proxy.git && cd zen-proxy && bun zen-proxy.mjs`
 
 ## Point any agent at it
 
@@ -54,7 +54,7 @@ Or clone and run: `git clone https://github.com/12errh/zen-proxy.git && cd zen-p
 {
   "provider": {
     "zen": {
-      "baseURL": "http://127.0.0.1:8787/v1",
+      "baseURL": "http://127.0.0.1:8181/v1",
       "apiKey": "public",
       "models": { "space-bunny-free": {} }
     }
@@ -65,7 +65,7 @@ Or clone and run: `git clone https://github.com/12errh/zen-proxy.git && cd zen-p
 Quick test:
 
 ```bash
-curl -s http://127.0.0.1:8787/v1/chat/completions \
+curl -s http://127.0.0.1:8181/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"space-bunny-free","messages":[{"role":"user","content":"say hi"}]}'
 ```
@@ -74,4 +74,4 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 
 - Full documentation: [README.md](README.md)
 - Everything in one file: [llms-full.txt](llms-full.txt)
-- Project: https://github.com/12errh/zen-proxy
+- Project: https://github.com/jeffpecky/zen-proxy

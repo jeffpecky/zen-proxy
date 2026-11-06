@@ -6,20 +6,32 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push supersedes the run it replaced; a stale green on old code is
+# worse than no result.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   test:
     name: ${{ matrix.os }} / node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            node: 18
+          # The supported floor and the current LTS lines. 18 is deliberately
+          # absent: it is end-of-life, and the code uses APIs it does not have.
           - os: ubuntu-latest
             node: 20
           - os: ubuntu-latest
             node: 22
+          - os: ubuntu-latest
+            node: 24
           - os: windows-latest
             node: 22
           - os: macos-latest
@@ -29,4 +41,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      # Syntax + import graph first: it fails in seconds and names the file,
+      # where the suite would take three minutes to reach the same conclusion.
+      - name: Syntax and imports
+        run: npm run check
       - run: npm test

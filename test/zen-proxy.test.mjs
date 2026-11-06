@@ -13,6 +13,8 @@ const isWindows = process.platform === "win32"
 
 // Must be set before importing the module (CONFIG_PATH is computed at load).
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-test-"))
+// Upstream always goes through the wreq TLS transport; tests stub fetch.
+process.env.ZEN_TLS = "0"
 process.env.ZEN_PROXY_CONFIG = path.join(tmpDir, "zen-proxy.json")
 delete process.env.PORT
 delete process.env.HOST
@@ -29,7 +31,7 @@ delete process.env.CACHE_MS
 delete process.env.AUTO_SYNC
 delete process.env.AUTO_SYNC_MS
 
-const zp = await import("../zen-proxy.mjs")
+const zp = await import("../src/index.mjs")
 const originalFetch = globalThis.fetch
 after(() => {
   globalThis.fetch = originalFetch
@@ -275,8 +277,8 @@ describe("ip handling", () => {
   })
 
   test("zenHeaders forwards x-opencode-* headers", () => {
-    const h = zp.zenHeaders(mockReq({ headers: { "x-opencode-session": "sess-1" } }), "Bearer public")
-    assert.equal(h["x-opencode-session"], "sess-1")
+    const h = zp.zenHeaders(mockReq({ headers: { "x-opencode-session": "ses_0000000000c1BbCcDdEeFfGgHh" } }), "Bearer public")
+    assert.equal(h["x-opencode-session"], "ses_0000000000c1BbCcDdEeFfGgHh")
   })
 })
 
@@ -289,10 +291,10 @@ describe("session injection", () => {
 
   test("client-provided session is passed through untouched", () => {
     const h = zp.zenHeaders(
-      mockReq({ remoteAddress: "8.8.8.8", headers: { "x-opencode-session": "real-session-1" } }),
+      mockReq({ remoteAddress: "8.8.8.8", headers: { "x-opencode-session": "ses_0000000000c2BbCcDdEeFfGgHh" } }),
       "Bearer public",
     )
-    assert.equal(h["x-opencode-session"], "real-session-1")
+    assert.equal(h["x-opencode-session"], "ses_0000000000c2BbCcDdEeFfGgHh")
   })
 
   test("injectSession=false disables injection", () => {
@@ -341,9 +343,9 @@ describe("session injection", () => {
   })
 
   test("a client-supplied session is mirrored into the second header", () => {
-    const h = zp.zenHeaders(mockReq({ headers: { "x-opencode-session": "ses_fromclient01" } }), "Bearer public")
-    assert.equal(h["x-opencode-session"], "ses_fromclient01")
-    assert.equal(h["x-opencode-session-id"], "ses_fromclient01")
+    const h = zp.zenHeaders(mockReq({ headers: { "x-opencode-session": "ses_0000000000d1BbCcDdEeFfGgHh" } }), "Bearer public")
+    assert.equal(h["x-opencode-session"], "ses_0000000000d1BbCcDdEeFfGgHh")
+    assert.equal(h["x-opencode-session-id"], "ses_0000000000d1BbCcDdEeFfGgHh")
   })
 })
 
@@ -384,12 +386,12 @@ describe("identityFor", () => {
   })
 
   test("a caller-supplied session passes through untouched, project follows policy", () => {
-    const id = zp.identityFor(mockReq({ headers: { "x-opencode-session": "ses_caller000001" } }))
-    assert.equal(id.session, "ses_caller000001")
+    const id = zp.identityFor(mockReq({ headers: { "x-opencode-session": "ses_0000000000a1BbCcDdEeFfGgHh" } }))
+    assert.equal(id.session, "ses_0000000000a1BbCcDdEeFfGgHh")
     assert.ok(!id.injected, "caller's own session is not flagged injected")
     const staticHash = createHash("sha1").update(`directory:${process.cwd()}`).digest("hex")
     assert.equal(id.project, staticHash, "legacy project derivation stands in for a real client")
-    const pinned = zp.identityFor(mockReq({ headers: { "x-opencode-session": "ses_caller000002", "x-opencode-project": "p_caller" } }))
+    const pinned = zp.identityFor(mockReq({ headers: { "x-opencode-session": "ses_0000000000a2BbCcDdEeFfGgHh", "x-opencode-project": "p_caller" } }))
     assert.equal(pinned.project, "p_caller", "a caller that carries its own project keeps it")
   })
 
@@ -412,9 +414,9 @@ describe("identityFor", () => {
     assert.match(a, /req 200 m-free 10ms ses_[0-9a-f]+…[0-9A-Za-z]{4}\(injected\) prj:[0-9a-f]{8}/)
     const tailOf = (line) => line.match(/…([0-9A-Za-z]{4})\(/)[1]
     assert.notEqual(tailOf(a), tailOf(b), "two callers, two distinct identities in the feed")
-    zp.recordReq(mockReq({ headers: { "x-opencode-session": "ses_stablecfg001" } }), "m-free", 10, 200)
+    zp.recordReq(mockReq({ headers: { "x-opencode-session": "ses_0000000000e1BbCcDdEeFfGgHh" } }), "m-free", 10, 200)
     const c = zp.logLines[before + 2].msg
-    assert.match(c, /ses_stablec…g001\(client\) prj:/, "a caller-supplied id shows as client, untouched")
+    assert.match(c, /ses_0000000…GgHh\(client\) prj:/, "a caller-supplied id shows as client, untouched")
   })
 
   test("zenHeaders sends the minted session and project as one pair", () => {
@@ -424,9 +426,9 @@ describe("identityFor", () => {
     const id = zp.identityFor(req, Date.now())
     assert.equal(h["x-opencode-session"], id.session)
     assert.equal(h["x-opencode-project"], id.project, "the pair travels as one identity, not a lone static hash")
-    const caller = mockReq({ headers: { "x-opencode-session": "ses_caller000003", "x-opencode-project": "proj_caller" } })
+    const caller = mockReq({ headers: { "x-opencode-session": "ses_0000000000a3BbCcDdEeFfGgHh", "x-opencode-project": "proj_caller" } })
     const hc = zp.zenHeaders(caller, "Bearer public")
-    assert.equal(hc["x-opencode-session"], "ses_caller000003")
+    assert.equal(hc["x-opencode-session"], "ses_0000000000a3BbCcDdEeFfGgHh")
     assert.equal(hc["x-opencode-project"], "proj_caller", "a caller's full pair is forwarded verbatim")
   })
 })
@@ -1713,6 +1715,55 @@ describe("handleChat", () => {
     assert.match(res.body, /FreeUsageLimitError/)
   })
 
+  test("a 429 rotates the minted identity and drops the pooled TLS session", async () => {
+    zp.saveConfig({ retriesPerModel: 0 })
+    const m = zp.config.fallbackModels[0]
+    const sessions = []
+    globalThis.fetch = async (u, opts) => {
+      sessions.push(opts.headers["x-opencode-session"])
+      return sessions.length === 1
+        ? jsonResponse({ error: { message: "FreeUsageLimitError" } }, 429)
+        : jsonResponse({ model: "ok", choices: [{ message: { content: "hi" } }] })
+    }
+    const req = mockReq({ _body: JSON.stringify({ model: m, messages: [] }) })
+    const res = mockRes()
+    await zp.handleChat(req, res)
+    // Whatever the flow, the retry never rides the identity that was refused.
+    assert.equal(res.state.status, 200)
+    assert.equal(sessions.length, 2)
+    assert.notEqual(sessions[1], sessions[0], "session identity rotated on 429")
+  })
+
+  test("a 429 rotates a caller id we had to translate, and never one we did not", async () => {
+    zp.saveConfig({ retriesPerModel: 0 })
+    const m = zp.config.fallbackModels[0]
+    const run = async (headers) => {
+      const sessions = []
+      globalThis.fetch = async (u, opts) => {
+        sessions.push(opts.headers["x-opencode-session"])
+        return sessions.length === 1
+          ? jsonResponse({ error: { message: "FreeUsageLimitError" } }, 429)
+          : jsonResponse({ model: "ok", choices: [{ message: { content: "hi" } }] })
+      }
+      const req = mockReq({ _body: JSON.stringify({ model: m, messages: [] }), headers })
+      await zp.handleChat(req, mockRes())
+      return sessions
+    }
+
+    // Off-shape (a generic client's UUID): ours to rotate — retrying the exact
+    // translated session that was just refused would be a guaranteed second 429.
+    const translated = await run({ "x-opencode-session": "550e8400-e29b-41d4-a716-446655440000" })
+    assert.equal(translated.length, 2)
+    assert.match(translated[0], zp.OPENCODE_SESSION_RE, "an off-shape caller id is translated first")
+    assert.notEqual(translated[1], translated[0], "the translated id rotated on 429")
+
+    // Already valid: this is a real OpenCode client riding the proxy — pass its
+    // identity through untouched, before and after the 429 (9router does the same).
+    const native = "ses_f534dfae8ffeCy4Ee4tLWNygDc"
+    const kept = await run({ "x-opencode-session": native })
+    assert.deepEqual(kept, [native, native], "a valid caller session is never rewritten")
+  })
+
   test("non-retryable 400 propagates its status, not 429", async () => {
     const m = zp.config.fallbackModels[0]
     globalThis.fetch = routeFetch([
@@ -2290,6 +2341,90 @@ describe("syncModels model-ID validation", () => {
   })
 })
 
+describe("/api/keys (hashed keys admin API)", () => {
+  const keyResp = async (method, { url = "/api/keys", headers, body } = {}) => {
+    const res = mockRes()
+    await zp.handleApiKeys(
+      mockReq({
+        method,
+        url,
+        headers: { "content-type": "application/json", host: "127.0.0.1:8181", ...(headers ?? {}) },
+        _body: body == null ? "" : JSON.stringify(body),
+      }),
+      res,
+    )
+    return res
+  }
+
+  test("requires a credential when one is configured", async () => {
+    zp.saveConfig({ proxyKey: "secret-admin" })
+    const res = await keyResp("GET", { headers: {} })
+    assert.equal(res.state.status, 401)
+  })
+
+  test("mints a key; plaintext shown once; never in config or listing", async () => {
+    zp.saveConfig({ proxyKey: "secret-admin" })
+    const res = await keyResp("POST", { headers: { authorization: "Bearer secret-admin" }, body: { name: "laptop" } })
+    assert.equal(res.state.status, 201)
+    const { key, id } = JSON.parse(res.body)
+    assert.match(key, zp.KEY_RE)
+    const onDisk = fs.readFileSync(process.env.ZEN_PROXY_CONFIG, "utf8")
+    assert.ok(!onDisk.includes(key), "config holds only the hash")
+    const list = await keyResp("GET", { headers: { authorization: "Bearer secret-admin" } })
+    assert.ok(!list.body.includes(key), "listing does not leak the plaintext")
+    assert.equal(JSON.parse(list.body).keys.some((k) => k.id === id), true)
+  })
+
+  test("config PUT cannot clobber apiKeys through the dashboard", async () => {
+    zp.saveConfig({ proxyKey: "secret-admin" })
+    zp.createApiKey("before")
+    const before = zp.config.apiKeys.length
+    const res = mockRes()
+    await zp.handleApiConfig(
+      mockReq({
+        method: "PUT",
+        url: "/api/config",
+        headers: { "content-type": "application/json", host: "127.0.0.1:8181" },
+        _body: JSON.stringify({ apiKeys: [] }),
+      }),
+      res,
+    )
+    assert.equal(zp.config.apiKeys.length, before, "apiKeys untouched by a config save")
+  })
+
+  test("revocation: DELETE /api/keys?id= stops the key at once", async () => {
+    zp.saveConfig({ proxyKey: "secret-admin" })
+    const { key, entry } = zp.createApiKey("gone")
+    const res = await keyResp("DELETE", { url: `/api/keys?id=${entry.id}`, headers: { authorization: "Bearer secret-admin" } })
+    assert.equal(res.state.status, 200)
+    assert.equal(zp.resolveApiKey(key), null)
+    const missing = await keyResp("DELETE", { url: `/api/keys?id=nope`, headers: { authorization: "Bearer secret-admin" } })
+    assert.equal(missing.state.status, 404)
+  })
+})
+
+describe("bootstrap key for public binds (9router parity)", () => {
+  test("loopback with no credentials stays open — nothing minted", () => {
+    zp.saveConfig({ proxyKey: "", apiKeys: [], host: "127.0.0.1" })
+    assert.equal(zp.ensureDefaultKey(), null)
+  })
+
+  test("public bind with no credentials mints one and auth turns on", () => {
+    zp.saveConfig({ proxyKey: "", apiKeys: [], host: "0.0.0.0" })
+    const minted = zp.ensureDefaultKey()
+    assert.match(minted, zp.KEY_RE)
+    assert.equal(zp.config.proxyKey, minted, "persisted for later read-back from the config file")
+    assert.equal(zp.authRequired(), true)
+    assert.equal(zp.authForUpstream(mockReq({})), null, "anonymous requests refused")
+    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${minted}` } })), "Bearer public")
+  })
+
+  test("never mints twice", () => {
+    assert.equal(zp.ensureDefaultKey(), null, "a key already exists")
+  })
+})
+
+
 describe("router / health", () => {
   // /health is cache-only (audit #17): an unauthenticated route must not drive
   // an upstream fetch per poll. The tests warm the cache the way any real
@@ -2475,7 +2610,7 @@ describe("shipped model catalog (models.json)", () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-catalog-"))
       const file = path.join(dir, "models.json")
       if (contents !== null) fs.writeFileSync(file, contents)
-      const script = `import { loadShippedModels } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+      const script = `import { loadShippedModels } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 console.log(JSON.stringify(loadShippedModels()))`
       try {
         return JSON.parse(
@@ -2503,7 +2638,7 @@ describe("model list pinning", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-pin-"))
     const file = path.join(dir, "zen-proxy.json")
     if (cfg !== null) fs.writeFileSync(file, JSON.stringify(cfg))
-    const script = `import { config, isFallbackModelsPinned, loadShippedModels } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+    const script = `import { config, isFallbackModelsPinned, loadShippedModels } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 console.log(JSON.stringify({ pinned: isFallbackModelsPinned(), n: config.fallbackModels.length, shipped: loadShippedModels().length }))`
     try {
       return {
@@ -2530,7 +2665,7 @@ console.log(JSON.stringify({ pinned: isFallbackModelsPinned(), n: config.fallbac
   })
 
   test("a config with no list follows models.json", () => {
-    const { state } = load({ port: 8787 })
+    const { state } = load({ port: 8181 })
     assert.equal(state.pinned, false)
     assert.equal(state.n, state.shipped)
   })
@@ -2560,7 +2695,7 @@ console.log(JSON.stringify({ pinned: isFallbackModelsPinned(), n: config.fallbac
     // fallbackModels back to disk and freeze this install on today's catalog.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-nopin-"))
     const cfg = path.join(dir, "zen-proxy.json")
-    const mod = new URL("../zen-proxy.mjs", import.meta.url).href
+    const mod = new URL("../src/index.mjs", import.meta.url).href
     fs.writeFileSync(cfg, JSON.stringify({ port: 8799 }))
     const script = `import { config, saveConfig, isFallbackModelsPinned } from ${JSON.stringify(mod)}
 saveConfig({ ua: "opencode/9.9.9" })
@@ -2594,7 +2729,7 @@ describe("upstream base URL", () => {
     const file = path.join(dir, "zen-proxy.json")
     if (upstream === null) fs.rmSync(file, { force: true })
     else fs.writeFileSync(file, JSON.stringify({ upstream }))
-    const script = `import { loadConfig } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+    const script = `import { loadConfig } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 console.log(loadConfig().upstream)`
     try {
       return execFileSync(process.execPath, ["--input-type=module", "-e", script], {
@@ -3281,9 +3416,11 @@ describe("free tier gate on the chat path", () => {
       messages: [{ role: "user", content: "hi" }],
       tools: [{ type: "function", function: { name: "read", parameters: { type: "object" } } }],
     })
-    // The manifest rides ahead of the caller's tools; the caller's `read`
-    // carries the same name as the manifest's, so it dedupes into it.
-    assert.deepEqual(seen[0].sent.tools.map((t) => t.function.name), manifestNames(), "manifest first, no duplicate caller read")
+    // The manifest rides ahead of the caller's tools. The caller's `read` has
+    // the same name but no parameters, so it cannot adopt OpenCode's definition
+    // in place and moves to `read_client` rather than being dropped — the agent
+    // keeps a runnable tool under a non-colliding name.
+    assert.deepEqual(seen[0].sent.tools.map((t) => t.function.name), manifestNames().concat(["read_client"]), "manifest first, caller read kept as read_client")
     assert.equal(seen[0].sent.tool_choice, undefined, "an agent turn must still be free to call tools")
   })
 
@@ -4148,9 +4285,17 @@ describe("the /v1/responses route speaks Responses", () => {
     await zp.handleChat(req, res, true)
     assert.equal(res.state.status, 200)
     // The caller's items travel as items — the harness preamble lands in the
-    // system slot the passthrough prepends, ahead of the caller's own.
+    // system slot the passthrough prepends, ahead of the caller's own. The
+    // captured `<env>` block is re-stamped at load: its working directory must
+    // never be the install tree (the gate 429s tooling paths, 9router measured).
     const preamble = fs.readFileSync(new URL("../agent-preamble.txt", import.meta.url), "utf8")
-    assert.deepEqual(sent.input[0], { type: "message", role: "system", content: preamble }, "the preamble rides as the system item")
+    assert.equal(sent.input[0].role, "system")
+    assert.ok(sent.input[0].content.startsWith(preamble.split("\n")[0]), "harness preamble heads the system slot")
+    assert.equal(sent.input[0].content.includes("<env>"), true)
+    assert.ok(
+      !/Working directory: .*(?:node_modules|\.zen-proxy)/.test(sent.input[0].content),
+      "working directory is never an install tree",
+    )
     assert.deepEqual(sent.input[1], input[0], "the caller's items follow untranslated")
     const data = JSON.parse(res.body)
     assert.equal(data.object, "response")
@@ -4895,9 +5040,11 @@ describe("manifest calls the caller cannot run are dropped from replies (issue #
     await zp.handleChat(req, res)
     const body = JSON.parse(res.body)
     assert.equal(res.state.status, 200)
-    // The caller's `read` and the manifest's `read` share a name; exactly one
-    // rides — the manifest's — and the caller's call still streams through.
-    assert.deepEqual(sent.tools.map((t) => t.function.name), manifestNames().concat(["client_nonce_lookup"]).filter((n, i, a) => a.indexOf(n) === i))
+    // The caller's `read` and the manifest's `read` share a name. Its
+    // parameters ({}) cannot carry OpenCode's (path required), so it moves to
+    // `read_client` rather than being dropped — the caller keeps a runnable
+    // tool, which is what lets its call loop survive.
+    assert.deepEqual(sent.tools.map((t) => t.function.name), manifestNames().concat(["read_client", "client_nonce_lookup"]).filter((n, i, a) => a.indexOf(n) === i))
     assert.equal(sent.tools.filter((t) => t.function.name === "read").length, 1)
     assert.equal(body.choices[0].message.tool_calls[0].function.name, "client_nonce_lookup")
   })
@@ -4995,6 +5142,31 @@ describe("proxyKey is the proxy's secret, not a Zen credential (audit #1/#2)", (
     assert.equal(res.state.status, 401)
   })
 
+  test("a minted sk- key authenticates on both routes, a forged one does not", () => {
+    const { key } = zp.createApiKey("t")
+    assert.match(key, zp.KEY_RE)
+    assert.ok(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${key}` } })), "real key accepted")
+    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer sk-${"A".repeat(43)}` } })), null)
+    assert.ok(zp.resolveApiKey(key), "the presented key resolves to its entry")
+    assert.equal(zp.resolveApiKey(key).legacy, undefined, "a minted key is not the legacy proxyKey")
+  })
+
+  test("minted keys hash-only: plaintext never lands in the config", () => {
+    const { key, entry } = zp.createApiKey("leak-test")
+    const onDisk = fs.readFileSync(process.env.ZEN_PROXY_CONFIG, "utf8")
+    assert.ok(!onDisk.includes(key), "the plaintext key is not in the config file")
+    assert.ok(onDisk.includes(entry.hash.slice(0, 16)), "its hash is")
+    zp.revokeApiKey(entry.id)
+    assert.equal(zp.resolveApiKey(key), null, "revocation is immediate")
+  })
+
+  test("listApiKeys exposes no hashes", () => {
+    const { key, entry } = zp.createApiKey("hidden")
+    assert.ok(!JSON.stringify(zp.listApiKeys()).includes(entry.hash))
+    zp.revokeApiKey(entry.id)
+    assert.deepEqual(zp.listApiKeys().find((k) => k.id === entry.id), undefined)
+  })
+
   test("x-api-key still works as a real Zen key when no proxyKey is set", () => {
     zp.saveConfig({ proxyKey: "", defaultZenKey: "" })
     assert.equal(zp.authForUpstream(mockReq({ headers: { "x-api-key": "my-zen-key" } })), "Bearer my-zen-key")
@@ -5009,7 +5181,7 @@ describe("proxyKey is the proxy's secret, not a Zen credential (audit #1/#2)", (
 })
 
 describe("admin writes cannot be forged by a web page (audit #3)", () => {
-  const put = (headers = {}, body = { port: 8787 }) =>
+  const put = (headers = {}, body = { port: 8181 }) =>
     mockReq({
       method: "PUT",
       url: "/api/config",
@@ -5019,7 +5191,7 @@ describe("admin writes cannot be forged by a web page (audit #3)", () => {
 
   test("a cross-origin upgrade attempt is refused", async () => {
     const res = mockRes()
-    await zp.handleApiConfig(put({ host: "127.0.0.1:8787", origin: "https://evil.example" }), res)
+    await zp.handleApiConfig(put({ host: "127.0.0.1:8181", origin: "https://evil.example" }), res)
     assert.equal(res.state.status, 403)
     assert.notEqual(zp.config.upstream, "https://evil.example")
   })
@@ -5042,7 +5214,7 @@ describe("admin writes cannot be forged by a web page (audit #3)", () => {
 
   test("a same-origin JSON write still works", async () => {
     const res = mockRes()
-    await zp.handleApiConfig(put({ host: "127.0.0.1:8787", origin: "http://127.0.0.1:8787" }), res)
+    await zp.handleApiConfig(put({ host: "127.0.0.1:8181", origin: "http://127.0.0.1:8181" }), res)
     assert.equal(res.state.status, 200)
   })
 
@@ -5257,10 +5429,10 @@ describe("the minted identity pair cannot be split by the caller (audit #12)", (
   })
 
   test("a caller that brings a full session+project pair still keeps both", () => {
-    const req = mockReq({ headers: { "x-opencode-session": "ses_caller111111", "x-opencode-project": "caller-project" } })
+    const req = mockReq({ headers: { "x-opencode-session": "ses_0000000000b1BbCcDdEeFfGgHh", "x-opencode-project": "caller-project" } })
     const h = zp.zenHeaders(req, "Bearer public")
     assert.equal(h["x-opencode-project"], "caller-project")
-    assert.equal(h["x-opencode-session"], "ses_caller111111")
+    assert.equal(h["x-opencode-session"], "ses_0000000000b1BbCcDdEeFfGgHh")
   })
 })
 
@@ -5686,7 +5858,7 @@ describe("a dashboard save only pins the catalog when it changed (audit #16)", (
 describe("the shipped defaults match the docs (audit #17/#18)", () => {
   const defaults = () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-defaults-"))
-    const script = `import { config } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+    const script = `import { config } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 console.log(JSON.stringify({ cacheMs: config.cacheMs, autoSync: config.autoSync, autoSyncIntervalMs: config.autoSyncIntervalMs }))`
     const env = { ...process.env, ZEN_PROXY_CONFIG: path.join(dir, "zen-proxy.json") }
     delete env.CACHE_MS
@@ -5763,7 +5935,7 @@ describe("the config file is written private (audit #23)", () => {
   test("saveConfig creates it 0600", { skip: isWindows && "POSIX mode bits do not exist on windows" }, () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-mode-"))
     const cfg = path.join(dir, "zen-proxy.json")
-    const script = `import { saveConfig } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+    const script = `import { saveConfig } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 import fs from "node:fs"
 saveConfig({ port: 8791 })
 console.log(JSON.stringify({ mode: (fs.statSync(process.env.ZEN_PROXY_CONFIG).mode & 0o777).toString(8) }))`
@@ -5787,7 +5959,7 @@ console.log(JSON.stringify({ mode: (fs.statSync(process.env.ZEN_PROXY_CONFIG).mo
 describe("a malformed env var does not kill the process at import (audit #24)", () => {
   test("bad JSON and bad numbers fall back to their defaults", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-proxy-env-"))
-    const script = `import { config } from ${JSON.stringify(new URL("../zen-proxy.mjs", import.meta.url).href)}
+    const script = `import { config } from ${JSON.stringify(new URL("../src/index.mjs", import.meta.url).href)}
 console.log(JSON.stringify({
   n: config.fallbackModels.length,
   aliases: config.modelAliases,
@@ -5816,7 +5988,7 @@ console.log(JSON.stringify({
       assert.ok(out.n > 0, "shipped catalog used when FALLBACK_MODELS is broken")
       assert.deepEqual(out.aliases, {})
       assert.ok(out.responses.includes("gpt-5*"))
-      assert.equal(out.port, 8787)
+      assert.equal(out.port, 8181)
       assert.equal(out.timeoutMs, 120000)
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
@@ -5875,7 +6047,7 @@ describe("/api/test reports the caller the request path reports (audit #32)", ()
 })
 
 describe("server hardening (audit #25)", () => {
-  const src = fs.readFileSync(new URL("../zen-proxy.mjs", import.meta.url), "utf8")
+  const src = fs.readFileSync(new URL("../src/server.mjs", import.meta.url), "utf8")
 
   test("inbound request reception is bounded", () => {
     assert.match(src, /server\.requestTimeout\s*=\s*300_000/, "requestTimeout is not left at 0")
@@ -5908,5 +6080,106 @@ describe("dead exports are gone, not just unused (audit #34)", () => {
     for (const name of ["AGENT_PREAMBLE_TEXT", "sessionHeader", "agentToolsFor", "headersWall"]) {
       assert.equal(name in zp, false, `${name} is still exported`)
     }
+  })
+})
+
+describe("reasoning effort matches what the gateway serves (9router parity)", () => {
+  test("adaptive/ultra never reach upstream as-is", () => {
+    // "auto" is adaptive thinking and is a 400 on the chat lane; "ultra" is a
+    // Claude Code tier no model publishes. Both are normalized, never forwarded.
+    assert.equal(zp.responsesReasoning({ model: "deepseek-v4.1-flash-free", reasoning_effort: "auto" }), null)
+    assert.deepEqual(zp.responsesReasoning({ model: "deepseek-v4.1-flash-free", reasoning_effort: "ultra" }), {
+      effort: "max",
+      summary: "auto",
+    })
+    // A level the model does not publish is clamped to the nearest one it does.
+    assert.equal(zp.responsesReasoning({ model: "deepseek-v4.1-flash-free", reasoning_effort: "medium" }).effort, "low")
+    assert.equal(zp.responsesReasoning({ model: "deepseek-v4.1-flash-free", reasoning_effort: "high" }).effort, "high")
+  })
+
+  test("Anthropic thinking budgets map onto tiers, and disabled means none", () => {
+    assert.equal(zp.responsesReasoning({ model: "gpt-5.5", thinking: { type: "disabled" } }), null)
+    assert.equal(zp.responsesReasoning({ model: "gpt-5.5", thinking: { type: "enabled", budget_tokens: 1024 } }).effort, "low")
+    assert.equal(zp.responsesReasoning({ model: "gpt-5.5", thinking: { type: "enabled", budget_tokens: 6000 } }).effort, "medium")
+    assert.equal(zp.responsesReasoning({ model: "gpt-5.5", thinking: { type: "enabled", budget_tokens: 20000 } }).effort, "high")
+    assert.equal(zp.responsesReasoning({ model: "gpt-5.5", thinking: { type: "enabled", budget_tokens: 50000 } }).effort, "max")
+  })
+
+  test("chat lane drops auto and clamps the rest", () => {
+    assert.equal("reasoning_effort" in zp.withStreamUsage({ model: "mimo-v2.6-flash-free", reasoning_effort: "auto" }), false)
+    assert.equal(zp.withStreamUsage({ model: "mimo-v2.6-flash-free", reasoning_effort: "ultra" }).reasoning_effort, "max")
+    assert.equal(zp.withStreamUsage({ model: "deepseek-v4.1-flash-free", reasoning_effort: "low" }).reasoning_effort, "low")
+  })
+})
+
+describe("responses items survive a pooled-credential upstream (9router parity)", () => {
+  test("prior reasoning items are dropped, not replayed", () => {
+    // The account that issued encrypted_content must decrypt it; `Bearer public`
+    // is a pool, so a replayed reasoning item is a 400 either way (encrypted or
+    // "not found"). Dropping it is what keeps multi-turn tool loops working.
+    const out = zp.sanitizeResponsesItems([
+      { type: "message", role: "user", content: "hi" },
+      { type: "reasoning", id: "rs_1", encrypted_content: "abc" },
+      { type: "message", role: "assistant", content: "hey" },
+    ])
+    assert.equal(out.length, 2)
+    assert.deepEqual(out.map((i) => i.type), ["message", "message"])
+  })
+
+  test("tool plumbing is clamped to what the API accepts", () => {
+    const longId = "call_" + "x".repeat(100)
+    const out = zp.sanitizeResponsesItems([
+      { type: "function_call", name: "  read  ", call_id: longId, arguments: { a: 1 } },
+      { type: "function_call", name: "", call_id: "c" },
+      { type: "function_call_output", call_id: "c", output: { ok: true } },
+      { type: "function_call", name: "grep", call_id: "c2", arguments: "{bad json" },
+    ])
+    assert.equal(out[0].name, "read")
+    assert.equal(out[0].call_id.length, 64)
+    assert.equal(out[0].arguments, '{"a":1}')
+    // The nameless call is unrunnable and does not ride at all.
+    assert.equal(out.length, 3)
+    assert.equal(out[1].output, '{"ok":true}')
+    assert.equal(out[2].arguments, "{}")
+  })
+
+  test("stray encrypted_content never reaches upstream", () => {
+    const out = zp.sanitizeResponsesItems([{ type: "message", role: "user", content: "x", encrypted_content: "zz" }])
+    assert.equal("encrypted_content" in out[0], false)
+  })
+})
+
+describe("fingerprint tools match 9router's rules (read/shell are gate-load-bearing)", () => {
+  const def = (n) => zp.loadAgentTools().find((t) => t.function.name === n).function
+
+  test("a caller read whose args can carry OpenCode's adopts OpenCode's definition in place", () => {
+    const own = { type: "function", function: { name: "read", description: "mine", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }
+    const { tools, map } = zp.applyFingerprintTools([own], false)
+    const read = tools.find((t) => t.function.name === "read")
+    assert.equal(read.function.description, def("read").description, "gate definition, caller kept its name")
+    assert.equal(map.size, 0, "nothing to restore — the name never changed")
+    assert.ok(tools.some((t) => t.function.name === "shell"), "shell still appended")
+  })
+
+  test("a caller read with incompatible args moves to read_client instead of being dropped", () => {
+    const own = { type: "function", function: { name: "read", description: "mine", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } } }
+    const { tools, map } = zp.applyFingerprintTools([own], false)
+    assert.deepEqual(tools.map((t) => t.function.name).sort(), ["read", "read_client", "shell"])
+    assert.equal(map.get("read_client"), "read")
+  })
+
+  test("missing read/shell are always appended, and never duplicated", () => {
+    const { tools } = zp.applyFingerprintTools([], false)
+    assert.deepEqual(tools.map((t) => t.function.name).sort(), ["read", "shell"])
+    const again = zp.applyFingerprintTools(tools, false)
+    assert.equal(again.tools.filter((t) => t.function.name === "read").length, 1)
+    assert.equal(again.tools.filter((t) => t.function.name === "shell").length, 1)
+  })
+
+  test("fingerprintToolKey only recognises OpenCode's own names", () => {
+    assert.equal(zp.fingerprintToolKey("read"), "read")
+    assert.equal(zp.fingerprintToolKey("shell"), "shell")
+    assert.equal(zp.fingerprintToolKey("Read"), "", "Claude Code's capitalised name is a caller tool, not a fingerprint")
+    assert.equal(zp.fingerprintToolKey("grep"), "")
   })
 })

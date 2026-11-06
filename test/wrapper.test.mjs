@@ -27,6 +27,7 @@ function stage(port, { fakeClaude = true } = {}) {
   fs.copyFileSync(SH, path.join(dir, "bin", "claude-zen"))
   fs.copyFileSync(MAKER, path.join(dir, "bin", "make-settings.mjs"))
   fs.copyFileSync(path.join(REPO, "zen-proxy.mjs"), path.join(dir, "zen-proxy.mjs"))
+  fs.cpSync(path.join(REPO, "src"), path.join(dir, "src"), { recursive: true })
   fs.copyFileSync(path.join(REPO, "models.json"), path.join(dir, "models.json"))
   fs.copyFileSync(path.join(REPO, "agent-tools.json"), path.join(dir, "agent-tools.json"))
   fs.writeFileSync(path.join(dir, "zen-proxy.json"), JSON.stringify({ port }))
@@ -69,7 +70,7 @@ function down(port = PORT) {
 describe("launcher settings", () => {
   test("the static fallback points at the proxy with a model pinned", () => {
     const cfg = JSON.parse(fs.readFileSync(SETTINGS, "utf8"))
-    assert.equal(cfg.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8787")
+    assert.equal(cfg.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8181")
     assert.equal(cfg.env.ANTHROPIC_AUTH_TOKEN, "public")
     assert.ok(cfg.env.ANTHROPIC_MODEL)
   })
@@ -243,6 +244,7 @@ describe("windows launcher (powershell)", { skip: !isWindows && "powershell laun
     fs.copyFileSync(MAKER, path.join(dir, "bin", "make-settings.mjs"))
     fs.copyFileSync(SETTINGS, path.join(dir, "claude", "zen-proxy.settings.json"))
     for (const f of ["zen-proxy.mjs", "models.json", "agent-tools.json"]) fs.copyFileSync(path.join(REPO, f), path.join(dir, f))
+    fs.cpSync(path.join(REPO, "src"), path.join(dir, "src"), { recursive: true })
     fs.writeFileSync(path.join(dir, "zen-proxy.json"), JSON.stringify({ port }))
     fs.writeFileSync(path.join(dir, "bin", "claude.cmd"), "@echo off\r\necho FAKE-CLAUDE-OK\r\n")
     return dir
@@ -326,6 +328,7 @@ describe("the launcher keeps the proxy alive", { skip: isWindows && "drives the 
     fs.copyFileSync(MAKER, path.join(dir, "bin", "make-settings.mjs"))
     fs.copyFileSync(SETTINGS, path.join(dir, "claude", "zen-proxy.settings.json"))
     for (const f of ["zen-proxy.mjs", "models.json", "agent-tools.json"]) fs.copyFileSync(path.join(REPO, f), path.join(dir, f))
+    fs.cpSync(path.join(REPO, "src"), path.join(dir, "src"), { recursive: true })
     fs.writeFileSync(path.join(dir, "zen-proxy.json"), JSON.stringify({ port: PORT }))
     // A stand-in for Claude Code that kills the proxy halfway through, the way a
     // crash or an OOM kill would, then keeps running for a few more seconds.

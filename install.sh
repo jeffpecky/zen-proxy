@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # Zen Proxy installer for Linux & macOS
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/12errh/zen-proxy/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jeffpecky/zen-proxy/main/install.sh | bash
 #   # or, from a local checkout:
 #   bash install.sh --local /path/to/zen-proxy
 #
 # Env options:
-#   ZEN_PROXY_REPO   GitHub "owner/repo" (default: 12errh/zen-proxy)
+#   ZEN_PROXY_REPO   GitHub "owner/repo" (default: jeffpecky/zen-proxy)
 #   ZEN_PROXY_DIR    install directory (default: ~/.zen-proxy)
-#   ZEN_PROXY_PORT   default port (default: 8787)
+#   ZEN_PROXY_PORT   default port (default: 8181)
 
 set -euo pipefail
 
-REPO="${ZEN_PROXY_REPO:-12errh/zen-proxy}"
+REPO="${ZEN_PROXY_REPO:-jeffpecky/zen-proxy}"
 INSTALL_DIR="${ZEN_PROXY_DIR:-$HOME/.zen-proxy}"
-PORT="${ZEN_PROXY_PORT:-8787}"
+PORT="${ZEN_PROXY_PORT:-8181}"
 LOCAL_SRC=""
 RESET_MODELS=0
 while [ "$#" -gt 0 ]; do
@@ -34,18 +34,42 @@ if [ -z "$INSTALL_DIR" ] || [ "$INSTALL_DIR" = "/" ]; then
 fi
 
 command -v curl >/dev/null 2>&1 || die "curl is required. Install it first."
-command -v node >/dev/null 2>&1 || die "Node.js >= 18 is required. See https://nodejs.org"
+command -v node >/dev/null 2>&1 || die "Node.js >= 20 is required. See https://nodejs.org"
 
 NODE_MAJOR=$(node -e 'console.log(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
-if [ "$NODE_MAJOR" -lt 18 ]; then die "Node.js >= 18 is required (found $(node -v)). See https://nodejs.org"; fi
+if [ "$NODE_MAJOR" -lt 20 ]; then die "Node.js >= 20 is required (found $(node -v)). See https://nodejs.org"; fi
 
-# The free tier fingerprints the client's TLS/HTTP stack: Node's fetch is
-# bucketed `429 FreeUsageLimitError` even for agent-shaped requests, Bun's is
-# not. Bun is the anonymous (no-key) mode's requirement; BYOK works on node
-# because a real key bypasses the free-tier gate.
+# The free tier fingerprints the client's TLS ClientHello: Node's native stack
+# is bucketed `429 FreeUsageLimitError` even for perfectly agent-shaped
+# requests. wreq-js (a prebuilt BoringSSL addon) supplies Bun 1.3.14's exact
+# ClientHello from inside the process, so the anonymous tier works under node
+# too. It is optional at runtime — a failed install degrades to native fetch
+# (BYOK only), it does not break the proxy.
+#
+# This runs AFTER the copy, not before: it used to sit above `mkdir` and the
+# file copy, so `cd "$INSTALL_DIR"` failed on a fresh machine, `npm` never ran,
+# and every new install silently started without the TLS transport.
+install_tls_transport() {
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "npm not found — install wreq-js by hand for anonymous access: cd \"$INSTALL_DIR\" && npm install wreq-js"
+    return
+  fi
+  info "Installing the TLS transport (wreq-js)…"
+  # `npm ci` when the lockfile shipped with this tree: it installs exactly the
+  # wreq-js build the project was tested against, so two installs a week apart
+  # cannot end up on different native addons. Falls back to `npm install` for a
+  # tree without a lockfile (an older checkout, or a hand-copied directory).
+  if [ -f "$INSTALL_DIR/package-lock.json" ] \
+      && ( cd "$INSTALL_DIR" && npm ci --omit=dev --no-audit --no-fund --loglevel=error ); then
+    return
+  fi
+  ( cd "$INSTALL_DIR" && npm install --omit=dev --no-audit --no-fund --loglevel=error ) \
+    || warn "wreq-js install failed — anonymous free-tier requests will be 429'd; rerun: cd \"$INSTALL_DIR\" && npm install wreq-js"
+}
+
 if ! command -v bun >/dev/null 2>&1; then
-  info "NOTE: bun not found — anonymous 'public' access needs it (Node's stack gets 429'd on the free tier)."
-  info "      Install with: curl -fsSL https://bun.sh/install | bash"
+  info "NOTE: bun not found. Not required any more (wreq-js carries the ClientHello),"
+  info "      but it keeps the proxy's own HTTP server on the same BoringSSL stack."
 fi
 
 mkdir -p "$INSTALL_DIR"
@@ -91,6 +115,9 @@ if [ ! -f "$INSTALL_DIR/zen-proxy.mjs" ]; then
   die "zen-proxy.mjs not found after install — check ZEN_PROXY_REPO"
 fi
 
+# Now that the tree exists. See install_tls_transport() for why this is here.
+install_tls_transport
+
 if [ ! -f "$INSTALL_DIR/zen-proxy.json" ]; then
   printf '{ "host": "127.0.0.1", "port": %s }\n' "$PORT" > "$INSTALL_DIR/zen-proxy.json"
   info "Created default config with port $PORT"
@@ -110,8 +137,8 @@ fi
 
 cat > "$INSTALL_DIR/zen-proxy" <<EOF
 #!/usr/bin/env bash
-# Bun first: the free-tier gate fingerprints the TLS/HTTP stack and bucket 429s
-# Node's (FreeUsageLimitError) even for perfectly agent-shaped requests.
+# Bun only when it is already there (same BoringSSL stack for the proxy's own
+# server); the outbound ClientHello comes from wreq-js either way.
 if command -v bun >/dev/null 2>&1; then
   exec bun "$INSTALL_DIR/zen-proxy.mjs" "\$@"
 fi
@@ -173,9 +200,9 @@ if command -v systemctl >/dev/null 2>&1 && [ -w /etc/systemd/system ]; then
   info ""
   read -r -p "Install as a systemd service (auto-start)? [y/N] " ans || true
   if [[ "$ans" =~ ^[Yy]$ ]]; then
-    # Prefer Bun: the gateway 429s Node's TLS stack on the free tier even for
-# agent-shaped requests (see README). Node keeps working for BYOK keys.
-SYSTEM_RUNNER=$(command -v bun || command -v node)
+    # Bun when present (same BoringSSL stack for the proxy's server); wreq-js
+    # supplies the ClientHello on the outbound leg either way.
+    SYSTEM_RUNNER=$(command -v bun || command -v node)
 cat > /etc/systemd/system/zen-proxy.service <<SVC
 [Unit]
 Description=Zen Proxy

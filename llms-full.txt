@@ -2,7 +2,7 @@
 
 > Everything from the project README, in one plain-markdown file for LLMs.
 
-Source: https://github.com/12errh/zen-proxy
+Source: https://github.com/jeffpecky/zen-proxy
 
 ---
 
@@ -24,7 +24,7 @@ anonymous free tier  ◦  no accounts  ◦  no keys  ◦  openai + anthropic com
 - **Model aliases** — call them `gpt-4o` or `claude-3-5`, get routed to free models
 - **Self-updating** — tracks new opencode releases (auto User-Agent) and a GitHub Action keeps the shipped free-model list current as models come and go
 - **Per-IP fairness** — real client IPs are forwarded (local clients fall back to the machine's real IP)
-- **A retro-zine management dashboard** — stats, one-click model tests, live config, and logs at `http://127.0.0.1:8787/`
+- **A retro-zine management dashboard** — stats, one-click model tests, live config, and logs at `http://127.0.0.1:8181/`
 - **One-file install** on Linux, macOS, and Windows with a single `curl`
 
 ---
@@ -40,7 +40,7 @@ opencode's free `-free` models (`big-pickle`, `glm-*-free`, `deepseek-*-free`, �
   ▸ feature list
   
     - **OpenAI-compatible API** — `/v1/chat/completions` (stream + non-stream), `/v1/models`, `/v1/responses`
-    - **v2 client parity** — runs under Bun (Node fallback only for BYOK keys), sends the v2 UA `opencode/latest/<version>/cli`, the CLI's identity headers, mints real-format session ids paired with a matching project hash, prepends the captured harness preamble to the system prompt, attaches OpenCode's full v2 tool manifest ahead of your tools, and filters every reply down to the calls the caller can run — renamed back where the caller has a counterpart (`read`→`Read`), dropped where it does not, invented tool names included
+    - **v2 client parity** — speaks Bun 1.3.14’s exact TLS ClientHello through the optional wreq-js addon (so Node and Bun both pass the gate; `ZEN_TLS=0` falls back to native fetch, BYOK only), rotates the session identity *and* the pooled TLS connection on a 429 (the bucket is per egress flow, so the retry dials a fresh one), sends the v2 UA `opencode/latest/<version>/cli`, the CLI's identity headers, mints real-format session ids paired with a matching project hash, prepends the captured harness preamble to the system prompt, attaches OpenCode's full v2 tool manifest ahead of your tools, and filters every reply down to the calls the caller can run — renamed back where the caller has a counterpart (`read`→`Read`), dropped where it does not, invented tool names included
     - **BYOK** — ride anonymous `public` or bring your own Zen key (stable + no shared-pool throttling)
     - **Smart fallback** — tries models in order on `429`/`5xx` and dead-model `4xx` (e.g. "Model is unavailable"), honors `retry-after`
     - **Model aliases** — e.g. `gpt-4o → mimo-v2.5-free`, replies rewritten back
@@ -58,19 +58,19 @@ Requires **Node.js ≥ 18**.
 **Linux / macOS**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/12errh/zen-proxy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jeffpecky/zen-proxy/main/install.sh | bash
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/12errh/zen-proxy/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/jeffpecky/zen-proxy/main/install.ps1 | iex
 ```
 
 Or just clone and run — it's a single file, no `npm install`:
 
 ```bash
-git clone https://github.com/12errh/zen-proxy.git && cd zen-proxy
+git clone https://github.com/jeffpecky/zen-proxy.git && cd zen-proxy
 bun zen-proxy.mjs
 ```
 
@@ -80,16 +80,16 @@ bun zen-proxy.mjs
 
 ```bash
 bun zen-proxy.mjs            # or the installer's `zen-proxy` launcher
-# dashboard → http://127.0.0.1:8787/
+# dashboard → http://127.0.0.1:8181/
 ```
 
 | Thing | Value |
 |---|---|
-| Dashboard / admin UI | `http://127.0.0.1:8787/` |
-| OpenAI base URL | `http://127.0.0.1:8787/v1` |
+| Dashboard / admin UI | `http://127.0.0.1:8181/` |
+| OpenAI base URL | `http://127.0.0.1:8181/v1` |
 | API key | `public` (any value once you set `proxyKey`) |
 | Example model | `mimo-v2.5-free` (auto default picks a healthy free model) |
-| Health check | `http://127.0.0.1:8787/health` |
+| Health check | `http://127.0.0.1:8181/health` |
 
 ### point your agent at it
 
@@ -99,7 +99,7 @@ Cline / Roo / Continue / Aider / mimo — anywhere you configure an OpenAI-compa
 {
   "provider": {
     "zen": {
-      "baseURL": "http://127.0.0.1:8787/v1",
+      "baseURL": "http://127.0.0.1:8181/v1",
       "apiKey": "public",
       "models": { "mimo-v2.5-free": {} }
     }
@@ -110,7 +110,7 @@ Cline / Roo / Continue / Aider / mimo — anywhere you configure an OpenAI-compa
 Quick test:
 
 ```bash
-curl -s http://127.0.0.1:8787/v1/chat/completions \
+curl -s http://127.0.0.1:8181/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"mimo-v2.5-free","messages":[{"role":"user","content":"say hi"}]}'
 ```
@@ -173,7 +173,7 @@ Config lives in **`zen-proxy.json`** (auto-created on first run, hot-reloaded wh
 | Key | Default | Description |
 |---|---|---|
 | `host` | `127.0.0.1` | Bind address (restart needed) |
-| `port` | `8787` | Listen port (restart needed) |
+| `port` | `8181` | Listen port (restart needed) |
 | `upstream` | `https://opencode.ai/inference/openai/v1` | Zen gateway base (v2; model discovery stays on `/inference/v1`) |
 | `ua` | `opencode/latest/2.1.4/cli` | The v2 CLI's User-Agent format; part of what the free-tier gate reads |
 | `autoUA` | `true` | Track opencode releases and update `ua` automatically (skips updating 1.x releases to a v2-style UA; npm only carries 1.x) |

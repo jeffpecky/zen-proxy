@@ -38,7 +38,7 @@ if (-not $config) {
         if (Test-Path $c) { $config = $c; break }
     }
 }
-$port = 8787
+$port = 8181
 if ($config -and (Test-Path $config)) {
     try {
         $parsed = Get-Content $config -Raw | ConvertFrom-Json

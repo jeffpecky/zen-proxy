@@ -1,13 +1,13 @@
 # Zen Proxy installer for Windows (PowerShell)
 # Usage (run in PowerShell):
-#   irm https://raw.githubusercontent.com/12errh/zen-proxy/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/jeffpecky/zen-proxy/main/install.ps1 | iex
 #   # or, from a local checkout:
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -LocalSrc C:\path\to\zen-proxy
 #
 # Env options:
-#   ZEN_PROXY_REPO   GitHub "owner/repo" (default: 12errh/zen-proxy)
+#   ZEN_PROXY_REPO   GitHub "owner/repo" (default: jeffpecky/zen-proxy)
 #   ZEN_PROXY_DIR    install directory (default: $HOME\.zen-proxy)
-#   ZEN_PROXY_PORT   default port (default: 8787)
+#   ZEN_PROXY_PORT   default port (default: 8181)
 
 param(
   [string]$LocalSrc = ""
@@ -15,18 +15,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Repo = $env:ZEN_PROXY_REPO
-if (-not $Repo) { $Repo = "12errh/zen-proxy" }
+if (-not $Repo) { $Repo = "jeffpecky/zen-proxy" }
 $InstallDir = $env:ZEN_PROXY_DIR
 if (-not $InstallDir) { $InstallDir = Join-Path $HOME ".zen-proxy" }
 $Port = $env:ZEN_PROXY_PORT
-if (-not $Port) { $Port = "8787" }
+if (-not $Port) { $Port = "8181" }
 
 function Info($m) { Write-Host $m -ForegroundColor Green }
 function Die($m) { Write-Host $m -ForegroundColor Red; exit 1 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  Die "Node.js >= 18 is required. Install from https://nodejs.org then re-run."
+  Die "Node.js >= 20 is required. Install from https://nodejs.org then re-run."
 }
+$nodeMajor = 0
+try { $nodeMajor = [int]((node -p "process.versions.node.split('.')[0]") 2>$null) } catch { $nodeMajor = 0 }
+if ($nodeMajor -lt 20) { Die "Node.js >= 20 is required (found $(node -v)). Install from https://nodejs.org then re-run." }
 
 if ([string]::IsNullOrWhiteSpace($InstallDir) -or $InstallDir -eq "/") {
   Die "Refusing to install into '$InstallDir'"
@@ -68,6 +71,30 @@ if ($CfgBak -and (Test-Path $CfgBak)) {
 
 if (-not (Test-Path (Join-Path $InstallDir "zen-proxy.mjs"))) {
   Die "zen-proxy.mjs not found after install - check ZEN_PROXY_REPO"
+}
+
+# TLS transport. The free tier fingerprints the ClientHello, and native Node
+# fetch is bucketed `429 FreeUsageLimitError` even for agent-shaped requests;
+# wreq-js ships Bun 1.3.14's exact BoringSSL profile in-process, so the
+# anonymous tier works under node. Optional at runtime: a failed install only
+# costs anonymous access, so warn instead of failing.
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+  Info "Installing the TLS transport (wreq-js)..."
+  Push-Location $InstallDir
+  try {
+    # `npm ci` pins the exact wreq-js build the project was tested against, so
+    # two installs a week apart cannot land on different native addons. Only
+    # when the lockfile shipped; otherwise fall back to a plain install.
+    if (Test-Path (Join-Path $InstallDir "package-lock.json")) {
+      npm ci --omit=dev --no-audit --no-fund --loglevel=error
+      if ($LASTEXITCODE -ne 0) { npm install --omit=dev --no-audit --no-fund --loglevel=error }
+    } else {
+      npm install --omit=dev --no-audit --no-fund --loglevel=error
+    }
+    if ($LASTEXITCODE -ne 0) { Write-Host "npm install failed - rerun: cd `"$InstallDir`"; npm install wreq-js" -ForegroundColor Yellow }
+  } finally { Pop-Location }
+} else {
+  Info "npm not found - anonymous free-tier access needs it: cd `"$InstallDir`"; npm install wreq-js"
 }
 
 if (-not (Test-Path $ConfigPath)) {
