@@ -71,7 +71,7 @@ const DEFAULT_CONFIG = {
   rateLimitWindowMs: envNum("RATE_LIMIT_WINDOW_MS", 60_000),
   // Dashboard login. NOT a client credential: `sk-…` keys in `apiKeys` are
   // for model calls only (see src/apikeys.mjs).
-  adminPassword: ENV.ADMIN_PASSWORD ?? ENV.PROXY_KEY ?? "",
+  adminPassword: ENV.ADMIN_PASSWORD ?? "",
   // Minted per-caller keys (see src/apikeys.mjs). Only the SHA-256 of each key
   // is stored, so a leaked config file carries no usable credential.
   apiKeys: [],

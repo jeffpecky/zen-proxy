@@ -93,7 +93,7 @@ server.listen(config.port, config.host, () => {
       // never see a refresh.
       const { fallbackModels, ...seed } = config
       // Through writeConfigFile, not a bare write: the seed carries the same
-      // secrets (PROXY_KEY / ZEN_KEY from the environment), and a plain
+      // secrets (ADMIN_PASSWORD / ZEN_KEY from the environment), and a plain
       // writeFileSync here created it world-readable with umask 022.
       writeConfigFile(seed)
       log(`created default config: ${CONFIG_PATH}`)

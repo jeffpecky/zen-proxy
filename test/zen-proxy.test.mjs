@@ -21,6 +21,7 @@ delete process.env.HOST
 delete process.env.ZEN_URL
 delete process.env.ZEN_UA
 delete process.env.DEFAULT_MODEL
+delete process.env.ADMIN_PASSWORD
 delete process.env.PROXY_KEY
 delete process.env.ZEN_KEY
 delete process.env.FALLBACK_MODELS

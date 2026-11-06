@@ -171,7 +171,7 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 | `modelAliases` | `{}` | e.g. `{"gpt-4o": "space-bunny-free"}` |
 | `responsesModels` | `["gpt-5*","gpt-6*","grok-*","muse-spark-*"]` | Models served on `/v1/responses`; patterns may end in `*` |
 | `defaultZenKey` | `""` | Your own Zen key instead of anonymous `public`; a 429 that says the *identity's* free allowance is spent ("Free usage limit reached") retries that same attempt once under this key before walking the chain — the shared-bucket cooldown never escalates |
-| `adminPassword` | `""` | Dashboard login only (`ADMIN_PASSWORD`, or the legacy `PROXY_KEY` env name). Opens `/` and `/api/*`; **does not** authenticate model calls. Empty + loopback = open dashboard |
+| `adminPassword` | `""` | Dashboard login only (`ADMIN_PASSWORD`). Opens `/` and `/api/*`; **does not** authenticate model calls. Empty + loopback = open dashboard |
 | `apiKeys` | `[]` | Client keys (`sk-…`) that authenticate **model calls**. Managed in Settings → Client keys or `POST /api/keys`; stored only as SHA-256. **Not** a dashboard login |
 | `requireApiKey` | `false` | Force auth even on a loopback bind behind a reverse proxy (`REQUIRE_API_KEY=1`) |
 | `rateLimitMax` / `rateLimitWindowMs` | `0` (off) / `60000` | Per-client rate limiting; local callers are split by user-agent family so several agents behind the same address do not share one budget |
@@ -181,13 +181,13 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 
 **Caller identity.** Upstream ties free usage to a session+project pair, not to a key: one pair reads as one CLI conversation in one project. The proxy keeps that story coherent instead of stretching a single anonymous session for everyone — each caller bucket (source IP + user-agent family, versions normalized away) gets its own pair, minted together and rotated together on a 30-minute schedule, so two agents on one machine read as two CLI conversations rather than one marathon session. A client that sends its own `x-opencode-session` / `x-opencode-project` keeps them untouched, and `projectHash` pins the project half for anonymous callers. Every forwarded request leaves one `/api/logs` line carrying the session id's head and tail and its injected/client origin, so rotation is observable. On a `429` the pair is re-minted and the pooled TLS connection closed together (see above), so a drained bucket is not inherited by the retry. This redistributes identical total usage across more honest identities — and it deliberately stops there: caller IPs are never rotated (the free tier is per-IP; `trustForwarded` alone governs how real IPs travel), so per-IP usage accounting is left exactly as opencode counts it.
 
-`HOST` `PORT` `ADMIN_PASSWORD` `ZEN_URL` `ZEN_UA` `ZEN_CLIENT` `ZEN_PROJECT_HASH` `ZEN_TRACING=0` `INJECT_SESSION=0` `AUTO_UA=0` `UA_REFRESH_MS` `AGENT_TOOLS=0` `AGENT_PREAMBLE=off` `ZEN_PROXY_AGENT_TOOLS` `ZEN_PROXY_AGENT_PREAMBLE` `ZEN_TLS=0` `ZEN_PROXY_WREQ` `PROBE_AUTH` `DEFAULT_MODEL` `FALLBACK_MODELS` `MODEL_ALIASES` `RESPONSES_MODELS` `PROXY_KEY` `REQUIRE_API_KEY` `ZEN_KEY` `TRUST_FORWARDED=1` `TIMEOUT_MS` `CACHE_MS` `RATE_LIMIT_MAX` `RATE_LIMIT_WINDOW_MS` `AUTO_SYNC=0` `AUTO_SYNC_MS` `ZEN_PROXY_CONFIG`
+`HOST` `PORT` `ADMIN_PASSWORD` `ZEN_URL` `ZEN_UA` `ZEN_CLIENT` `ZEN_PROJECT_HASH` `ZEN_TRACING=0` `INJECT_SESSION=0` `AUTO_UA=0` `UA_REFRESH_MS` `AGENT_TOOLS=0` `AGENT_PREAMBLE=off` `ZEN_PROXY_AGENT_TOOLS` `ZEN_PROXY_AGENT_PREAMBLE` `ZEN_TLS=0` `ZEN_PROXY_WREQ` `PROBE_AUTH` `DEFAULT_MODEL` `FALLBACK_MODELS` `MODEL_ALIASES` `RESPONSES_MODELS` `REQUIRE_API_KEY` `ZEN_KEY` `TRUST_FORWARDED=1` `TIMEOUT_MS` `CACHE_MS` `RATE_LIMIT_MAX` `RATE_LIMIT_WINDOW_MS` `AUTO_SYNC=0` `AUTO_SYNC_MS` `ZEN_PROXY_CONFIG`
 
 **Two credentials, two jobs — as in 9router, OpenRouter and Zen itself.**
 
 | | What it does | Where it lives |
 |---|---|---|
-| **Admin password** (`adminPassword`) | Logs into the dashboard and `/api/*`. Nothing else | `zen-proxy.json`, masked in the UI. Env: `ADMIN_PASSWORD` (legacy alias: `PROXY_KEY`) |
+| **Admin password** (`adminPassword`) | Logs into the dashboard and `/api/*`. Nothing else | `zen-proxy.json`, masked in the UI. Env: `ADMIN_PASSWORD` |
 | **Client key** (`sk-…` in `apiKeys`) | Authenticates model calls on `/v1/*`. Nothing else — it does **not** log into the dashboard | Hash only (SHA-256), shown once at mint |
 
 A client key starts with `sk-` + 43 base64url chars (256 bits from the CSPRNG) and is minted in Settings → Client keys or via `POST /api/keys`. Modelled on 9router's lifecycle, hardened for a public host: only the hash is stored (9router keeps keys plaintext), compared in constant time, plaintext shown exactly once, revocable with `DELETE /api/keys?id=…` (holders get `401` immediately). Several keys so a leaked one is dropped without rotating the rest — still one user, not multi-tenant.
