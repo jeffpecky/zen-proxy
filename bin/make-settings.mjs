@@ -11,7 +11,7 @@
 // id actually sent is still ours — the row never lies about it.
 import fs from "node:fs"
 
-const port = Number(process.argv[2] || 8787)
+const port = Number(process.argv[2] || 8181)
 const outPath = process.argv[3]
 if (!outPath) {
   console.error("usage: make-settings.mjs <port> <outPath>")

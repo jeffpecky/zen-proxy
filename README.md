@@ -65,14 +65,14 @@ It starts the proxy if it is not already running, loads every live free Zen mode
 
 | Setting | Value |
 |---|---|
-| Base URL | `http://127.0.0.1:8787/v1` |
+| Base URL | `http://127.0.0.1:8181/v1` |
 | API key | `public` |
 | Model | anything from `GET /v1/models` |
 
 Confirm the proxy is up:
 
 ```bash
-curl -s http://127.0.0.1:8787/health
+curl -s http://127.0.0.1:8181/health
 # {"ok":true,"upstream":"https://opencode.ai/inference/openai/v1"}
 ```
 
@@ -80,7 +80,7 @@ curl -s http://127.0.0.1:8787/health
 <summary>Run the proxy yourself</summary>
 
 ```bash
-zen-proxy     # http://127.0.0.1:8787 — dashboard at /
+zen-proxy     # http://127.0.0.1:8181 — dashboard at /
 ```
 
 It stays up until you stop it, so you point your agent at it once and keep using it. `zen-claude` does this for you and cleans up after.
@@ -100,7 +100,7 @@ It stays up until you stop it, so you point your agent at it once and keep using
 | Automatic fallback | Retries the next free model on `429` / `5xx` / unavailable |
 | Model aliases | Call it `gpt-4o`, get a free model back |
 | Auth | Anonymous `Bearer public`, or bring your own Zen key |
-| Dashboard | `http://127.0.0.1:8787/` |
+| Dashboard | `http://127.0.0.1:8181/` |
 
 The free-model catalog in [`models.json`](models.json) is refreshed from OpenCode's public catalog by a GitHub Action every 6 hours.
 
@@ -124,14 +124,16 @@ zen-proxy sits in front of that gateway and makes your agent's traffic indisting
 
 | Gateway requirement | What zen-proxy does |
 |---|---|
-| **Run under Bun.** The gate fingerprints the TLS/HTTP stack — the exact bytes that stream `200` under Bun's fetch get `429 FreeUsageLimitError` from Node's (same second, same session) | `zen-proxy` / `zen-claude` prefer bun; node works with a BYOK key, and the proxy warns at boot under node |
+| **TLS/HTTP stack.** The gate fingerprints the ClientHello — the same bytes that stream `200` under Bun's fetch get `429 FreeUsageLimitError` from Node's (same second, same session) | Every upstream call goes through **wreq-js** (BoringSSL, in-process) pinned to Bun 1.3.14's captured profile: its cipher list in wire order, ALPN `http/1.1` only, groups X25519/P-256/P-384, OCSP + SCT extensions. Runtime-agnostic — node and bun both pass. `ZEN_TLS=0` opts out (BYOK only). |
 | The v2 endpoint `https://opencode.ai/inference/openai/v1` | Uses it, and migrates old configs pointing at `/inference/v1` or `/zen/v1` |
 | The v2 wire identity: `x-opencode-client`, `x-opencode-project` (sha1, one half of the caller's minted pair), `b3`/`traceparent`, affinity pair | Sends all of it, in the CLI's own formats |
 | The **OpenCode harness system text** — requests whose system prompt is not the CLI's harness preamble are refused however agent-shaped the rest is (a generic prompt, the opening line, or a ~1.8 KB cut of it are all refused) | Prepends the captured harness preamble (`agent-preamble.txt`) ahead of your agent's own instructions, on every route, idempotently |
 | OpenCode's own tool manifest (the gate refuses a bare `read` stub now) | Attaches the captured v2 manifest (`agent-tools.json`: read/edit/glob/grep/shell/write are the ones whose name your agent maps to) ahead of your tools, renames the mapped calls back to your agent's names, and drops the rest |
 | Streams with `stream_options` and a real `max_completion_tokens` | Mirrors the CLI's shape on health probes, and forwards yours untouched |
 
-**Run it with bun** (`bun zen-proxy.mjs`, or through `zen-proxy`/`zen-claude`, which pick bun when present): that is the one requirement node cannot substitute away — the gateway 429s node's stack even though headers, sessions and bodies are byte-identical.
+**On a `429`, the egress flow rotates — not just the model.** The gate buckets usage by TLS connection × exit IP, so minting a new session id inside the same pooled connection answers `429` forever. zen-proxy drops both halves on the first 429 that arrives: it forgets the minted identity pair and closes the wreq session (`resetTlsSession()`), so the retry dials a fresh connection — and behind a rotating proxy, a fresh exit IP. This is the "restarting fixes it" effect, done per request.
+
+**Run it with bun if you have it** (`bun zen-proxy.mjs`, or through `zen-proxy`/`zen-claude`, which pick bun when present). It is no longer required — wreq-js supplies the ClientHello under node too — but bun keeps the proxy's own HTTP server on the same BoringSSL stack as the outbound leg.
 
 For replies, one rule: a reply may only carry calls your agent can actually run. An agent turn with its own tools keeps its calls (mapped manifest calls come back renamed) and loses everything else — manifest names it has no counterpart for, and tool names the provider invents; a `tool_choice`-pinned turn keeps only the pinned call; a reply with no tools attached at all (title generators, plain pings) is stripped of every `tool_call`. Health probes send the same harness preamble + manifest + a real ask (serially, spaced out — the gate blanket-403s a rapid model-hop burst from one identity), so a model in the dashboard's `ok` row genuinely answered; the old `rate-limited` parking behaviour is gone (a `FreeUsageLimitError` bucket no longer removes or dead-labels a model).
 </details>
@@ -157,7 +159,7 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 
 | Key | Default | Description |
 |---|---|---|
-| `host` / `port` | `127.0.0.1` / `8787` | Bind address (restart required) |
+| `host` / `port` | `127.0.0.1` / `8181` | Bind address (restart required) |
 | `upstream` | `https://opencode.ai/inference/openai/v1` | Zen gateway base (v2; discovery stays on `/inference/v1`) |
 | `ua` / `autoUA` | `opencode/latest/2.1.4/cli` / `true` | The v2 CLI's UA format; auto-tracking skips v2-style UAs (npm only carries 1.x) |
 | `clientName` / `projectHash` / `tracing` | `cli` / auto / `true` | The v2 identity headers: `x-opencode-client`, `x-opencode-project` (sha1 hex — the install directory's, or the minted pair's project for anonymous callers), `b3`/`traceparent` |
@@ -175,9 +177,9 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 | `autoSync` / `autoSyncIntervalMs` | `true` / `3600000` | Runtime discovery of newly-offered free models |
 | `trustForwarded` | `false` | Honour `x-forwarded-for` behind a reverse proxy |
 
-**Caller identity.** Upstream ties free usage to a session+project pair, not to a key: one pair reads as one CLI conversation in one project. The proxy keeps that story coherent instead of stretching a single anonymous session for everyone — each caller bucket (source IP + user-agent family, versions normalized away) gets its own pair, minted together and rotated together on a 30-minute schedule, so two agents on one machine read as two CLI conversations rather than one marathon session. A client that sends its own `x-opencode-session` / `x-opencode-project` keeps them untouched, and `projectHash` pins the project half for anonymous callers. Every forwarded request leaves one `/api/logs` line carrying the session id's head and tail and its injected/client origin, so rotation is observable. This redistributes identical total usage across more honest identities — and it deliberately stops there: caller IPs are never rotated (the free tier is per-IP; `trustForwarded` alone governs how real IPs travel), so per-IP usage accounting is left exactly as opencode counts it.
+**Caller identity.** Upstream ties free usage to a session+project pair, not to a key: one pair reads as one CLI conversation in one project. The proxy keeps that story coherent instead of stretching a single anonymous session for everyone — each caller bucket (source IP + user-agent family, versions normalized away) gets its own pair, minted together and rotated together on a 30-minute schedule, so two agents on one machine read as two CLI conversations rather than one marathon session. A client that sends its own `x-opencode-session` / `x-opencode-project` keeps them untouched, and `projectHash` pins the project half for anonymous callers. Every forwarded request leaves one `/api/logs` line carrying the session id's head and tail and its injected/client origin, so rotation is observable. On a `429` the pair is re-minted and the pooled TLS connection closed together (see above), so a drained bucket is not inherited by the retry. This redistributes identical total usage across more honest identities — and it deliberately stops there: caller IPs are never rotated (the free tier is per-IP; `trustForwarded` alone governs how real IPs travel), so per-IP usage accounting is left exactly as opencode counts it.
 
-`HOST` `PORT` `ZEN_URL` `ZEN_UA` `ZEN_CLIENT` `ZEN_PROJECT_HASH` `ZEN_TRACING=0` `INJECT_SESSION=0` `AUTO_UA=0` `UA_REFRESH_MS` `AGENT_TOOLS=0` `AGENT_PREAMBLE=off` `ZEN_PROXY_AGENT_TOOLS` `ZEN_PROXY_AGENT_PREAMBLE` `PROBE_AUTH` `DEFAULT_MODEL` `FALLBACK_MODELS` `MODEL_ALIASES` `RESPONSES_MODELS` `PROXY_KEY` `ZEN_KEY` `TRUST_FORWARDED=1` `TIMEOUT_MS` `CACHE_MS` `RATE_LIMIT_MAX` `RATE_LIMIT_WINDOW_MS` `AUTO_SYNC=0` `AUTO_SYNC_MS` `ZEN_PROXY_CONFIG`
+`HOST` `PORT` `ZEN_URL` `ZEN_UA` `ZEN_CLIENT` `ZEN_PROJECT_HASH` `ZEN_TRACING=0` `INJECT_SESSION=0` `AUTO_UA=0` `UA_REFRESH_MS` `AGENT_TOOLS=0` `AGENT_PREAMBLE=off` `ZEN_PROXY_AGENT_TOOLS` `ZEN_PROXY_AGENT_PREAMBLE` `ZEN_TLS=0` `ZEN_PROXY_WREQ` `PROBE_AUTH` `DEFAULT_MODEL` `FALLBACK_MODELS` `MODEL_ALIASES` `RESPONSES_MODELS` `PROXY_KEY` `ZEN_KEY` `TRUST_FORWARDED=1` `TIMEOUT_MS` `CACHE_MS` `RATE_LIMIT_MAX` `RATE_LIMIT_WINDOW_MS` `AUTO_SYNC=0` `AUTO_SYNC_MS` `ZEN_PROXY_CONFIG`
 
 Anonymous `public` access shares a per-IP quota that is sometimes saturated. Set `defaultZenKey`, or send `x-zen-key` per request, for steadier service.
 </details>
@@ -185,7 +187,7 @@ Anonymous `public` access shares a per-IP quota that is sometimes saturated. Set
 <details>
 <summary>Dashboard</summary>
 
-`http://127.0.0.1:8787/` — upstream health and uptime, a live request feed, one-click model testing, instant config editing, and a log tail.
+`http://127.0.0.1:8181/` — upstream health and uptime, a live request feed, one-click model testing, instant config editing, and a log tail.
 
 ![zen-proxy dashboard](assets/dashboard.png)
 </details>

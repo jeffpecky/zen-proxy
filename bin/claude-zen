@@ -47,9 +47,9 @@ if command -v bun >/dev/null 2>&1; then RUNNER=bun; fi
 
 CONFIG="${ZEN_PROXY_CONFIG:-}"
 [ -n "$CONFIG" ] || { for c in "$ROOT/zen-proxy.json" "$ROOT/../zen-proxy.json"; do [ -f "$c" ] && { CONFIG="$c"; break; }; done; }
-PORT=8787
+PORT=8181
 if [ -n "$CONFIG" ] && [ -f "$CONFIG" ]; then
-  PORT="$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).port||8787)}catch{console.log(8787)}' "$CONFIG" 2>/dev/null || echo 8787)"
+  PORT="$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).port||8181)}catch{console.log(8181)}' "$CONFIG" 2>/dev/null || echo 8181)"
 fi
 
 healthy() { curl -fsS -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; }

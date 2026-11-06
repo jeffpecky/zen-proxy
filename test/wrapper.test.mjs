@@ -69,7 +69,7 @@ function down(port = PORT) {
 describe("launcher settings", () => {
   test("the static fallback points at the proxy with a model pinned", () => {
     const cfg = JSON.parse(fs.readFileSync(SETTINGS, "utf8"))
-    assert.equal(cfg.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8787")
+    assert.equal(cfg.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8181")
     assert.equal(cfg.env.ANTHROPIC_AUTH_TOKEN, "public")
     assert.ok(cfg.env.ANTHROPIC_MODEL)
   })

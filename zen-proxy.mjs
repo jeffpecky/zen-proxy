@@ -3,7 +3,8 @@ import http from "node:http"
 import fs from "node:fs"
 import path from "node:path"
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto"
-import { fileURLToPath } from "node:url"
+import { createRequire } from "node:module"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
@@ -36,6 +37,230 @@ function normalizeUpstream(v) {
   if (!u) return DEFAULT_UPSTREAM
   return LEGACY_UPSTREAMS.has(u.toLowerCase()) ? DEFAULT_UPSTREAM : u
 }
+
+// ---- upstream TLS transport ------------------------------------------------
+// The free-tier gate keys on the TLS ClientHello, not on headers or bodies:
+// one process, one egress IP, one body — 200 under Bun's BoringSSL fetch and
+// `429 FreeUsageLimitError` under Node's OpenSSL, in the same second. So the
+// proxy's own TLS stack decides the verdict before any of this file's header
+// and prompt work is even read.
+//
+// wreq-js is that transport: BoringSSL in-process, with the profile pinned to
+// what Bun 1.3.14 actually sends (captured 2026-10-27 against tls.peet.ws:
+// ja4 t13d1714h1_5b57614c22b0_43ade6aba3df, ja3 d871d02cecbde59abbf8f4806134addf).
+// Only the cipher-list hash is compared upstream, so the list must stay
+// verbatim and in order. ALPN is http/1.1-only because Bun's fetch is; the two
+// extensions below are what wreq omits by default and Bun sends. It is the one
+// transport for every opencode.ai call (inference, probes, catalog) — a native
+// fetch next to it would be the request the gate 429s.
+//
+// Loaded lazily and optionally: a checkout without the addon still boots, says
+// so once, and falls back to the native fetch (which is expected to be refused
+// on the free tier). `ZEN_TLS=0` forces the fallback, which is how the tests
+// keep their stubbed globalThis.fetch.
+const OPENCODE_CIPHERS = [
+  "TLS_AES_128_GCM_SHA256",
+  "TLS_AES_256_GCM_SHA384",
+  "TLS_CHACHA20_POLY1305_SHA256",
+  "ECDHE-ECDSA-AES128-GCM-SHA256",
+  "ECDHE-RSA-AES128-GCM-SHA256",
+  "ECDHE-ECDSA-AES256-GCM-SHA384",
+  "ECDHE-RSA-AES256-GCM-SHA384",
+  "ECDHE-ECDSA-CHACHA20-POLY1305",
+  "ECDHE-RSA-CHACHA20-POLY1305",
+  "ECDHE-ECDSA-AES128-SHA",
+  "ECDHE-RSA-AES128-SHA",
+  "ECDHE-ECDSA-AES256-SHA",
+  "ECDHE-RSA-AES256-SHA",
+  "AES128-GCM-SHA256",
+  "AES256-GCM-SHA384",
+  "AES128-SHA",
+  "AES256-SHA",
+].join(":")
+const OPENCODE_TLS_PROFILE = {
+  cipherList: OPENCODE_CIPHERS,
+  alpnProtocols: ["HTTP1"],
+  curvesList: "X25519:P-256:P-384",
+  enableOcspStapling: true,
+  enableSignedCertTimestamps: true,
+}
+const TLS_ENABLED = ENV.ZEN_TLS !== "0"
+
+let wreqPromise = null
+// Resolution order: an explicit path (ZEN_PROXY_WREQ), the install dir's
+// node_modules, this machine's global node_modules. Same fallback a `require`
+// from a script in the install tree would get, minus the package.json games.
+async function loadWreq() {
+  if (!wreqPromise) {
+    wreqPromise = (async () => {
+      const explicit = ENV.ZEN_PROXY_WREQ
+      const specs = explicit ? [path.isAbsolute(explicit) || explicit.startsWith("file:") ? pathToFileURL(explicit).href : explicit] : ["wreq-js"]
+      for (const spec of specs) {
+        try {
+          return await import(spec)
+        } catch {}
+      }
+      for (const base of [path.join(__dirname, "package.json"), path.join(process.cwd(), "package.json")]) {
+        try {
+          return await import(pathToFileURL(createRequire(base).resolve("wreq-js")).href)
+        } catch {}
+      }
+      throw new Error(`wreq-js not found — npm i wreq-js (or set ZEN_PROXY_WREQ), or ZEN_TLS=0 to run on node's TLS`)
+    })().catch((err) => {
+      wreqPromise = null
+      throw err
+    })
+  }
+  return wreqPromise
+}
+
+// Sessions are keyed by proxy URL, exactly as 9router does: wreq's `proxy` is
+// session-scoped, so one session per egress keeps its connection pool and TLS
+// session tickets on that egress instead of thrashing them across pool members.
+// "direct" is the no-proxy key. LRU-capped; eviction closes the pool slot.
+const DIRECT_KEY = "direct"
+const MAX_TLS_SESSIONS = 32
+const tlsSessions = new Map()
+let tlsWarned = false
+
+function proxyKey(proxyUrl) {
+  return String(proxyUrl || DIRECT_KEY)
+}
+
+// Proxy URLs may carry user:pass — never let credentials into a log line.
+function maskProxyUrl(proxyUrl) {
+  try {
+    const u = new URL(proxyUrl)
+    return `${u.protocol}//${u.hostname}${u.port ? ":" + u.port : ""}`
+  } catch {
+    return proxyUrl
+  }
+}
+
+// The configured egress list. Empty = direct (the behaviour before proxies).
+// One entry is still worth having: it is the only way a 429 can land on a
+// different exit IP, since a fresh socket to the same IP is the same bucket.
+let proxyCursor = 0
+function proxyList() {
+  return Array.isArray(config.proxyUrls) ? config.proxyUrls.filter((u) => typeof u === "string" && u.trim()) : []
+}
+// Round-robin by default (a pool with N members should spread load), unless a
+// caller pins one.
+function pickProxy() {
+  const list = proxyList()
+  if (!list.length) return null
+  return list[proxyCursor++ % list.length]
+}
+// A 429 means this egress is drained: move the cursor past it before the retry
+// so the next attempt cannot land on the same bucket. A single-entry list has
+// nowhere else to go — the caller is told that at boot.
+function advanceProxy() {
+  const list = proxyList()
+  if (!list.length) return null
+  proxyCursor++
+  return list[proxyCursor % list.length]
+}
+
+async function tlsSessionGet(proxyUrl) {
+  const key = proxyKey(proxyUrl)
+  const cached = tlsSessions.get(key)
+  if (cached) {
+    // LRU touch.
+    tlsSessions.delete(key)
+    tlsSessions.set(key, cached)
+    return cached
+  }
+  const wreq = await loadWreq()
+  if (typeof wreq.createSession !== "function") throw new Error("wreq-js has no createSession")
+  const pending = wreq.createSession({
+    // alpnProtocols is copied: a mutating build must not poison the const.
+    emulation: { tlsOptions: { ...OPENCODE_TLS_PROFILE, alpnProtocols: [...OPENCODE_TLS_PROFILE.alpnProtocols] } },
+    ...(key === DIRECT_KEY ? {} : { proxy: key }),
+  }).catch((err) => {
+    // Only evict our own entry: a concurrent reset may have replaced it, and
+    // deleting that one would close a pool slot someone else is using.
+    if (tlsSessions.get(key) === pending) tlsSessions.delete(key)
+    throw err
+  })
+  tlsSessions.set(key, pending)
+  while (tlsSessions.size > MAX_TLS_SESSIONS) {
+    const oldest = tlsSessions.keys().next().value
+    const evicted = tlsSessions.get(oldest)
+    tlsSessions.delete(oldest)
+    evicted.then((s) => s.close?.()).catch(() => {})
+  }
+  return pending
+}
+
+/**
+ * Close and forget cached connections. With `proxyUrl`, only that egress —
+ * the one a 429 condemned. Without it, every egress (ZEN_TLS reload, shutdown).
+ */
+function resetTlsSession(proxyUrl) {
+  if (proxyUrl === undefined) {
+    const all = [...tlsSessions.values()]
+    tlsSessions.clear()
+    for (const p of all) p.then((s) => s.close?.()).catch(() => {})
+    return
+  }
+  const key = proxyKey(proxyUrl)
+  const pending = tlsSessions.get(key)
+  tlsSessions.delete(key)
+  if (pending) pending.then((s) => s.close?.()).catch(() => {})
+}
+
+/**
+ * Fetch through the impersonated-TLS session. Returns a native Response so the
+ * relays' `.body.getReader()` / `for await` paths work unchanged and the body
+ * stays a live stream, never buffered. `timeout: 0` for streams: the handler's
+ * own walls own that deadline, and wreq's timeout spans the whole body.
+ */
+async function tlsFetch(url, init = {}, proxyUrl = null) {
+  const session = await tlsSessionGet(proxyUrl)
+  const { signal, timeout, ...rest } = init
+  const res = await session.fetch(url, {
+    ...rest,
+    timeout: timeout ?? 0,
+    ...(signal ? { signal } : {}),
+  })
+  const headers = {}
+  res.headers?.forEach?.((value, key) => {
+    headers[key] = value
+  })
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+}
+
+/**
+ * The single way upstream opencode.ai is reached. Every route, probe and sync
+ * call goes through here — one transport, one connection model, one place to
+ * rotate from. Returns the proxy the call actually used so a 429 handler knows
+ * which egress to condemn.
+ */
+let lastProxyUrl = null
+async function upstreamFetch(url, init = {}) {
+  if (!TLS_ENABLED) return fetch(url, init)
+  const proxyUrl = pickProxy()
+  lastProxyUrl = proxyUrl
+  try {
+    return await tlsFetch(url, init, proxyUrl)
+  } catch (err) {
+    // strictProxy semantics, as 9router's proxyFetch has them: a proxy that was
+    // *intended* but failed must not be replayed over the real IP. Refusing is
+    // the point — the direct IP may be one the operator is deliberately keeping
+    // off this endpoint. With nothing configured there is nothing to be strict
+    // about, so the plain fallback stays.
+    if (config.proxyStrict && proxyUrl) {
+      throw new Error(`proxy required but failed (strictProxy): ${maskProxyUrl(proxyUrl)} — ${err?.message ?? err}`)
+    }
+    if (!tlsWarned) {
+      tlsWarned = true
+      log(`⚠  TLS transport unavailable (${err?.message ?? err}) — falling back to native fetch,`)
+      log("   which the free tier refuses with 429 unless a Zen key is configured.")
+    }
+    return fetch(url, init)
+  }
+}
+
 
 // ---- shipped model catalog -------------------------------------------------
 // models.json is the source of truth for which free models we offer. The
@@ -139,6 +364,133 @@ function agentToolsFor(callerToolNames) {
   return loadAgentTools().filter((t) => wanted.has(AGENT_TOOL_MAP[t.function.name].name))
 }
 
+// ---- fingerprint tools ------------------------------------------------------
+// The free tier requires OpenCode's own `read` and `shell` declared with their
+// EXACT descriptions and parameter schemas. A stubbed description, a renamed
+// schema, or `tool_choice:"none"` is answered 403 FreeTierError (9router probes
+// 2026-10-26). Caller tools otherwise ride untouched.
+//
+// zen-proxy used to merge the manifest first and then DROP any caller tool whose
+// name collided with a manifest name. That satisfies the gate but silently
+// deletes the caller's own `read`/`shell` — a tool loop that then cannot run
+// what the model was just told it could. The rule here is 9router's:
+//
+//   1. a caller tool already carrying OpenCode's exact definition → keep as-is
+//   2. same name but different wording, and its parameters can carry OpenCode's
+//      → adopt OpenCode's definition IN PLACE (caller keeps its own name, so
+//      there is no alias to restore)
+//   3. otherwise move the caller tool to `<key>_client` and append OpenCode's
+//      copy under the real name
+//   4. any remaining missing fingerprint tool is appended
+const FINGERPRINT_TOOL_NAMES = ["read", "shell"]
+function fingerprintDefinition(key) {
+  return loadAgentTools().find((t) => t.function.name === key)?.function
+}
+function fingerprintToolKey(name) {
+  const trimmed = String(name ?? "").trim()
+  return FINGERPRINT_TOOL_NAMES.includes(trimmed) ? trimmed : ""
+}
+function toolDefinition(tool) {
+  const fn = tool?.function
+  return fn && typeof fn === "object" && !Array.isArray(fn) ? fn : tool
+}
+function isFingerprintDefinition(tool, key) {
+  const def = toolDefinition(tool)
+  const want = fingerprintDefinition(key)
+  if (!def || !want) return false
+  return def.description === want.description && JSON.stringify(def.parameters) === JSON.stringify(want.parameters)
+}
+// OpenCode composes the shell description from `process.platform`, so the same
+// tool on Windows says "Commands run on Windows using pwsh." while the capture
+// says "Commands run on Linux using bash." — a two-word difference that an exact
+// compare rejects, so compare the *arguments* instead.
+function canNormalizeInPlace(tool, key) {
+  const want = fingerprintDefinition(key)
+  const props = toolDefinition(tool)?.parameters?.properties
+  if (!want?.parameters?.properties || !props || typeof props !== "object" || Array.isArray(props)) return false
+  const wanted = Object.keys(want.parameters.properties)
+  const declared = Object.keys(props)
+  if (declared.some((name) => !wanted.includes(name))) return false
+  return (want.parameters.required ?? []).every((name) => declared.includes(name))
+}
+function withFingerprintDefinition(tool, key) {
+  const want = fingerprintDefinition(key)
+  if (!want) return tool
+  const fn = tool?.function
+  const def = { description: want.description, parameters: want.parameters }
+  return fn && typeof fn === "object" && !Array.isArray(fn)
+    ? { ...tool, function: { ...fn, ...def } }
+    : { ...tool, ...def }
+}
+// Sent-name -> original-name, for the reply/history side to restore.
+function concealFingerprintToolNames(tools) {
+  const map = new Map()
+  if (!Array.isArray(tools) || !tools.length) return { tools, map }
+  const taken = new Set(tools.map(toolNameOf).filter(Boolean))
+  const seen = new Set()
+  const out = []
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
+      out.push(tool)
+      continue
+    }
+    const key = fingerprintToolKey(toolNameOf(tool))
+    if (!key) {
+      out.push(tool)
+      continue
+    }
+    // Duplicate declarations of one name are rejected upstream; keep the first.
+    if (seen.has(key)) continue
+    seen.add(key)
+    if (isFingerprintDefinition(tool, key)) {
+      out.push(tool)
+      continue
+    }
+    if (canNormalizeInPlace(tool, key)) {
+      out.push(withFingerprintDefinition(tool, key))
+      continue
+    }
+    let alias = `${key}_client`
+    for (let i = 2; taken.has(alias); i++) alias = `${key}_client${i}`
+    taken.add(alias)
+    map.set(alias, key)
+    out.push(withToolName(tool, alias))
+  }
+  return { tools: out, map }
+}
+// Append OpenCode's definition for each fingerprint tool the list does not
+// already carry under that exact name.
+function appendMissingFingerprintTools(tools, flat) {
+  const appended = []
+  if (!Array.isArray(tools)) return appended
+  for (const name of FINGERPRINT_TOOL_NAMES) {
+    if (tools.some((tool) => fingerprintToolKey(toolNameOf(tool)) === name)) continue
+    const src = fingerprintDefinition(name)
+    if (!src) continue
+    tools.push(
+      flat
+        ? { type: "function", name, description: src.description, parameters: src.parameters, strict: false }
+        : { type: "function", function: { name, description: src.description, parameters: src.parameters } },
+    )
+    appended.push(name)
+  }
+  return appended
+}
+/**
+ * The request-side tool pass, on top of the manifest merge:
+ *   1. caller tools colliding with a fingerprint name are normalized or aliased
+ *   2. the foreign gate-word aliases are applied (reportfindings, terminal)
+ *   3. `read` and `shell` are guaranteed present with OpenCode's definitions
+ * Returns the sent-name -> original-name map for the reply/history side.
+ */
+function applyFingerprintTools(tools, flat) {
+  const { tools: normalized, map } = concealFingerprintToolNames(tools)
+  const all = Array.isArray(normalized) ? normalized : []
+  aliasToolsInPlace(all, map)
+  appendMissingFingerprintTools(all, flat)
+  return { tools: all, map }
+}
+
 // The manifest rides on every request (the v2 gate refuses anything less), so
 // the model may answer with one of its tools even when the caller never
 // offered an equivalent — measured 3-6 of 12 against the live gateway on a
@@ -192,11 +544,39 @@ function pinnedToolName(toolChoice) {
 //   anything else — used verbatim as the preamble
 const AGENT_PREAMBLE_PATH = process.env.ZEN_PROXY_AGENT_PREAMBLE || path.join(__dirname, "agent-preamble.txt")
 const PREAMBLE_MARKER = "You are an AI agent running in OpenCode"
+
+// The gate fingerprints tooling traffic by the Working directory it reads out of
+// the `<env>` block: a plausible project directory passes, an install tree does
+// not (9router measured `...\npm\node_modules\9router\app` answering 429
+// deterministically while `Documents\anything` passed). A proxy installed to
+// ~\.zen-proxy and started from there would therefore poison every request —
+// silently, and regardless of how perfect the headers and TLS are. So the
+// captured block is re-stamped at load with a plausible user workspace instead
+// of the install path. Everything else in the capture stays byte-identical.
+function sanitizeEnvWorkDir(dir) {
+  const d = String(dir ?? "")
+  const installTree =
+    d === __dirname ||
+    /(?:^|[\\/])node_modules(?:[\\/]|$)/.test(d) ||
+    /(?:^|[\\/])\.zen-proxy(?:[\\/]|$)/.test(d) ||
+    /(?:^|[\\/])zen-proxy(?:[\\/]|$)/.test(d)
+  return installTree ? path.join(process.env.HOME || process.env.USERPROFILE || "", "Documents", "opencode") : d
+}
+const ENV_WORK_DIR = sanitizeEnvWorkDir(process.cwd())
+
+function stampPreamble(text) {
+  if (!text || !text.includes("<env>")) return text
+  return text
+    .replace(/^(\s*Working directory: ).*$/m, `$1${ENV_WORK_DIR}`)
+    .replace(/^(\s*Workspace root folder: ).*$/m, `$1${ENV_WORK_DIR}`)
+    .replace(/^(\s*Platform: ).*$/m, `$1${process.platform}`)
+}
+
 let agentPreambleCache = null
 function builtInPreamble() {
   if (agentPreambleCache === null) {
     try {
-      agentPreambleCache = fs.readFileSync(AGENT_PREAMBLE_PATH, "utf8")
+      agentPreambleCache = stampPreamble(fs.readFileSync(AGENT_PREAMBLE_PATH, "utf8"))
     } catch {
       agentPreambleCache = ""
     }
@@ -211,13 +591,17 @@ function bridgePreamble() {
   if (s === "off" || s === "none") return ""
   return s
 }
-// A system text that is already opencode-shaped stays untouched, so opencode
-// itself (or a chained proxy) can sit behind zen-proxy without a doubled
-// preamble.
+// A system text that already carries opencode's full harness block stays
+// untouched, so opencode itself (or a chained proxy) can sit behind zen-proxy
+// without a doubled preamble. The dedupe key is the `<env>` block, NOT the
+// opener sentence: measured 2026-11-05, a system holding only the opener line
+// ("You are an AI agent running in OpenCode, a coding agent harness.") is
+// answered 429 — the gate wants opener AND `<env>` together, which is exactly
+// why 9router's systemCarriesEnv() keys on the tag.
 function combinePreamble(systemText) {
   const preamble = bridgePreamble()
   if (!preamble) return systemText
-  if (systemText && systemText.startsWith(PREAMBLE_MARKER)) return systemText
+  if (systemText && systemText.includes("<env>")) return systemText
   return systemText ? `${preamble}\n\n${systemText}` : preamble
 }
 // Prepend the preamble to the first system message of a chat-shaped message
@@ -295,7 +679,7 @@ function envNum(name, dflt) {
 
 const DEFAULT_CONFIG = {
   host: ENV.HOST ?? "127.0.0.1",
-  port: envNum("PORT", 8787),
+  port: envNum("PORT", 8181),
   upstream: normalizeUpstream(ENV.ZEN_URL ?? DEFAULT_UPSTREAM),
   // The v2 CLI's own wire format (captured from the real client): channel
   // "latest", artifact "cli", plus the client/project identity headers below.
@@ -342,6 +726,17 @@ const DEFAULT_CONFIG = {
   rateLimitWindowMs: envNum("RATE_LIMIT_WINDOW_MS", 60_000),
   proxyKey: ENV.PROXY_KEY ?? "",
   defaultZenKey: ENV.ZEN_KEY ?? "",
+  // Egress list. Empty = direct. More than one is what makes the 429 rotation
+  // mean something: a fresh socket to the same IP is the same quota bucket, so
+  // only a different exit IP escapes a drained one. Round-robin per request,
+  // and the 429 ladder steps past the drained entry. Accepts http(s) and
+  // socks5:// (wreq tunnels both).
+  proxyUrls: envJson("PROXY_URLS", []).filter?.((u) => typeof u === "string" && u.trim()) ?? [],
+  // With one proxy (or a pool that can go down) a failed tunnel would otherwise
+  // silently replay the request over this machine's real IP — leaking the
+  // address the proxy exists to hide, and burning its bucket. Strict means
+  // refuse instead; it only bites when a proxy was actually configured.
+  proxyStrict: ENV.PROXY_STRICT === "1",
   trustForwarded: ENV.TRUST_FORWARDED === "1",
   timeoutMs: envNum("TIMEOUT_MS", 120000),
   // The shipped values must match what the docs promise: a 30s model cache and
@@ -514,6 +909,11 @@ const SESSION_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqr
 // schedule so a proxy left running for days does not start failing on a stale ID.
 const SESSION_MAX_AGE_MS = 30 * 60_000
 let sessionClock = { ms: 0, ctr: 0 }
+// What a real session id looks like. Upstream decodes the leading 12 hex as a
+// creation timestamp and refuses anything else, so a caller-supplied id that
+// does not match this shape must never be forwarded verbatim (9router validates
+// with the same regex, opencode.js:27).
+const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/
 function genSessionId(now = Date.now()) {
   if (now !== sessionClock.ms) {
     sessionClock.ms = now
@@ -525,6 +925,50 @@ function genSessionId(now = Date.now()) {
   const hex = Array.from({ length: 6 }, (_, i) => Number(masked >> BigInt(40 - 8 * i) & 0xffn).toString(16).padStart(2, "0")).join("")
   const tail = Array.from(randomBytes(14), (b) => SESSION_ALPHABET[b % 62]).join("")
   return { value: "ses_" + hex + tail, at: now }
+}
+// A caller's own session id: an id already in the CLI's shape is forwarded
+// untouched, anything else (a UUID from a generic client, a placeholder) is
+// translated deterministically per (session, tool, epoch) so one conversation
+// keeps one stable upstream identity across turns. Digest-derived timestamps
+// were measured to pass only 1/10 while Date.now() passed 10/10, so the
+// translation mints with the current clock and memoizes instead of deriving the
+// time field (9router arrived at the same conclusion, opencode.js:73-78).
+//
+// The epoch is what makes a 429 able to move a translated id: a memo hit would
+// otherwise hand the SAME refused session back to every retry, while a valid
+// native id is left alone (9router rotates only the ids it minted itself,
+// opencode.js:171-185).
+const translatedSessions = new Map()
+const MAX_TRANSLATED_SESSIONS = 5000
+// One counter per caller bucket, bumped by a 429. Small enough that a bucket
+// that saw many 429s does not leak entries.
+const sessionEpochs = new Map()
+const MAX_SESSION_EPOCHS = 1000
+function sessionEpoch(key) {
+  const entry = sessionEpochs.get(key)
+  return entry ? entry.epoch : 0
+}
+function bumpSessionEpoch(key) {
+  const current = sessionEpochs.get(key)
+  sessionEpochs.delete(key)
+  sessionEpochs.set(key, { epoch: (current?.epoch || 0) + 1 })
+  for (const oldest of sessionEpochs.keys()) {
+    if (sessionEpochs.size <= MAX_SESSION_EPOCHS) break
+    sessionEpochs.delete(oldest)
+  }
+}
+function translateSessionId(sessionId, clientTool = "", epoch = 0) {
+  const raw = String(sessionId ?? "").trim()
+  if (OPENCODE_SESSION_RE.test(raw)) return raw
+  const key = `${clientTool || "generic"}\0${epoch}\0${raw}`
+  const hit = translatedSessions.get(key)
+  if (hit && Date.now() - hit.at < SESSION_MAX_AGE_MS) return hit.value
+  const minted = genSessionId()
+  if (translatedSessions.size >= MAX_TRANSLATED_SESSIONS) {
+    translatedSessions.delete(translatedSessions.keys().next().value)
+  }
+  translatedSessions.set(key, minted)
+  return minted.value
 }
 function sessionFor(req) {
   const identity = identityFor(req)
@@ -582,7 +1026,12 @@ function identityFor(req, now = Date.now()) {
   if (typeof incoming === "string" && incoming.trim()) {
     const callerProject = req?.headers?.["x-opencode-project"]
     return {
-      session: incoming.trim(),
+      // Validated, not trusted: a caller's UUID or placeholder would be refused
+      // upstream (the prefix decodes as a timestamp), so an off-shape id is
+      // translated deterministically instead of forwarded. The epoch moves the
+      // memo after a 429 so a translated id can rotate; a caller's own valid id
+      // is returned untouched and therefore never rotates behind its back.
+      session: translateSessionId(incoming, uaFingerprint(req), sessionEpoch(identityBucketKey(req))),
       injected: false,
       project:
         typeof callerProject === "string" && callerProject.trim()
@@ -596,6 +1045,30 @@ function identityFor(req, now = Date.now()) {
   const minted = mintedIdentity(req, now)
   return { session: minted.value, injected: true, project: minted.project }
 }
+// A 429 from this gateway is not "your quota is spent" as often as it is "this
+// egress flow is in a drained bucket": upstream keys the free tier on the TLS
+// connection's exit, and the session id rides inside that connection. Rotating
+// the minted identity alone therefore changes nothing — the next request reuses
+// the wreq keep-alive socket. The retry ladder drops all three together:
+// forget the identity, close that egress's TLS session, and step the proxy
+// cursor to the next exit IP. A single-entry proxy list (or none) can only
+// manage the first two; the boot log says so.
+function rotateEgress(req) {
+  // A caller that brought its own session keeps it — rewriting another
+  // client's identity is not ours to do. That holds only for an id already in
+  // the CLI's shape: an off-shape caller id was translated by us, so it is ours
+  // to rotate, and leaving it memoized would retry the exact session that was
+  // just refused. The transport half rotates either way.
+  const incoming = req?.headers?.["x-opencode-session"]
+  if (typeof incoming === "string" && incoming.trim()) {
+    if (!OPENCODE_SESSION_RE.test(incoming.trim())) bumpSessionEpoch(identityBucketKey(req))
+  } else {
+    identityPool.delete(identityBucketKey(req))
+  }
+  resetTlsSession(lastProxyUrl)
+  return advanceProxy()
+}
+
 function parseRetryAfter(v) {
   if (v == null) return 0
   const n = Number(v)
@@ -824,11 +1297,31 @@ function anthropicToChatBody(body, model) {
   // agentTools: false.) A model may still answer with a manifest tool the
   // caller has no equivalent for; `keepableFor` feeds the reply layer,
   // which drops exactly those.
+  // The gate takes opencode's own manifest on every request (a caller's tools
+  // plus a `read` stub alone is refused since the v2 gateway). Caller tools ride
+  // first, then the manifest fills in whatever is missing — so a caller that
+  // already declares `read`/`shell` keeps its own definition (normalized in
+  // place when its arguments allow) instead of having it silently replaced or
+  // dropped by a manifest duplicate. (Off in agentTools: false.)
   const bridge = gateBridgeTools()
-  const manifestNames = new Set(bridge.map((t) => t?.function?.name))
-  const callerTools = (tools ?? []).filter((t) => !manifestNames.has(t?.function?.name ?? t?.name))
-  const all = bridge.length ? [...bridge, ...callerTools] : callerTools
-  if (all?.length) payload.tools = all
+  const callerTools = tools ?? []
+  const { tools: fingerprintTools } = bridge.length
+    ? applyFingerprintTools([...(callerTools ?? [])], false)
+    : { tools: callerTools }
+  // Manifest first (the shape every shipped test pins), then the caller's tools.
+  // Dedupe by name, first wins: a caller tool normalized in place is byte-equal
+  // to its manifest twin, and an incompatible one has already moved to
+  // `<key>_client`, so nothing the caller declared is silently lost.
+  const all = bridge.length ? [...bridge, ...fingerprintTools] : callerTools
+  const named = []
+  const taken = new Set()
+  for (const t of all) {
+    const n = t?.function?.name ?? t?.name
+    if (!n || taken.has(n)) continue
+    taken.add(n)
+    named.push(t)
+  }
+  if (named.length) payload.tools = named
   // Anthropic's tool_choice and opencode's use the same vocabulary once renamed.
   if (typeof body?.tool_choice === "object" && body.tool_choice?.type === "tool") {
     payload.tool_choice = { type: "function", function: { name: body.tool_choice.name } }
@@ -1124,13 +1617,69 @@ function responsesInputItemArray(input) {
   return input == null ? [] : [{ type: "message", role: "user", content: textOf(input) }]
 }
 
+// Prior-turn reasoning items cannot survive a stateless pooled-credential call:
+// the Responses API only lets the account that issued `encrypted_content`
+// decrypt it, and `Bearer public` is a pool — replaying one answers 400
+// "reasoning encrypted_content was not issued to this caller". With `store:false`
+// (what this gateway uses) dropping just `encrypted_content` gets the item
+// rejected as "not found or was deleted". Dropping the item is the only shape
+// that works, and it is what lets multi-turn tool loops complete at all.
+// Tool plumbing is clamped the same way: a call_id over 64 chars is an
+// InputValidationError, arguments must be a JSON string or "{}", and a call with
+// no name is unrunnable. Mirrors 9router's sanitizeResponsesItems.
+const MAX_CALL_ID = 64
+function clampCallId(id) {
+  if (typeof id !== "string" || !id) return `call_${Date.now()}_${(clampCallId.seq = (clampCallId.seq ?? 0) + 1)}`
+  return id.length > MAX_CALL_ID ? id.slice(0, MAX_CALL_ID) : id
+}
+function coerceArgs(v) {
+  if (v == null || v === "") return "{}"
+  if (typeof v !== "string") {
+    try {
+      return JSON.stringify(v)
+    } catch {
+      return "{}"
+    }
+  }
+  try {
+    JSON.parse(v)
+    return v
+  } catch {
+    return "{}"
+  }
+}
+function sanitizeResponsesItems(items) {
+  if (!Array.isArray(items)) return items
+  const out = []
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      out.push(item)
+      continue
+    }
+    if (item.type === "reasoning") continue
+    delete item.encrypted_content
+    delete item.reasoning_encrypted_content
+    if (item.type === "function_call") {
+      if (!item.name || typeof item.name !== "string" || !item.name.trim()) continue
+      item.name = item.name.trim().slice(0, 64)
+      item.call_id = clampCallId(item.call_id)
+      item.arguments = coerceArgs(item.arguments)
+    } else if (item.type === "function_call_output") {
+      item.call_id = clampCallId(item.call_id)
+      if (typeof item.output !== "string") item.output = item.output != null && typeof item.output === "object" ? JSON.stringify(item.output) : String(item.output ?? "")
+    }
+    out.push(item)
+  }
+  return out
+}
+
 // A Responses request body -> the chat-shaped body the request loop already
 // understands. Only the fields that have a chat counterpart travel;
 // `instructions` becomes the system message, Responses tools (flat) become
 // chat tools (nested), `max_output_tokens` maps onto both token keys.
 function responsesInputToChatBody(body) {
   const chat = { model: body?.model }
-  const messages = responsesInputToMessages(body.input)
+  const messages = responsesInputToMessages(sanitizeResponsesItems(body.input))
   const sys = typeof body.instructions === "string" && body.instructions ? [{ role: "system", content: body.instructions }] : []
   chat.messages = sys.length ? [...sys, ...messages] : messages
   if (body.stream != null) chat.stream = !!body.stream
@@ -1142,6 +1691,12 @@ function responsesInputToChatBody(body) {
     chat.max_completion_tokens = Math.floor(mt)
   }
   if (body.parallel_tool_calls != null) chat.parallel_tool_calls = body.parallel_tool_calls
+  // Thinking is part of the request, not a transport detail: a Responses caller
+  // sends `reasoning:{effort,summary}` and a chat-shaped caller sends
+  // `reasoning_effort`. Both must survive the translation or the model answers
+  // with its default tier while the client believes it asked for another one.
+  if (body.reasoning != null) chat.reasoning = body.reasoning
+  if (body.reasoning_effort != null) chat.reasoning_effort = body.reasoning_effort
   if (Array.isArray(body.tools) && body.tools.length) {
     const tools = []
     for (const t of body.tools) {
@@ -1399,12 +1954,24 @@ function projectHash() {
   return cachedProjectHash
 }
 
+// A caller that IS an OpenCode v2 client keeps its own UA — its version is what
+// the gate ties the request to. Everyone else is relabelled as the CLI, because
+// a non-CLI UA is the clearest refusal signal there is. Same split 9router's
+// buildHeaders makes (hasValidOpencodeVersion), including the v2-only rule:
+// `opencode/latest/<x.y.z>/cli` and nothing older.
+const OPENCODE_UA_RE = /^opencode\/[a-z0-9-]+\/(\d+)\.\d+\.\d+\/[a-z0-9-]+$/i
+function upstreamUserAgent(req) {
+  const ua = String(req?.headers?.["user-agent"] ?? "").trim()
+  const m = ua.match(OPENCODE_UA_RE)
+  return m && parseInt(m[1], 10) >= 2 ? ua : config.ua
+}
+
 function zenHeaders(req, auth) {
   const headers = {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
     authorization: auth,
-    "user-agent": config.ua,
+    "user-agent": upstreamUserAgent(req),
   }
   const identity = identityFor(req)
   // Send both session headers whenever we are allowed to supply one. A client
@@ -1426,8 +1993,10 @@ function zenHeaders(req, auth) {
   if (config.tracing) for (const [k, v] of Object.entries(traceHeaders())) headers[k] = v
   const ip = clientIp(req)
   if (!ipOmit(ip)) headers["x-real-ip"] = ip
-  const requestHeader = req.headers["x-opencode-request"]
-  if (typeof requestHeader === "string" && requestHeader) headers["x-opencode-request"] = requestHeader
+  // `x-opencode-request` is v1-only and the v2 gateway rejects any request that
+  // carries it (403 FreeTierError, measured by 9router's executor). It used to
+  // be forwarded from the caller verbatim, which let a client that speaks the
+  // old protocol get a valid request refused. Dropped, not renamed.
   return headers
 }
 
@@ -1543,25 +2112,77 @@ function json(res, status, data) {
 // inspected: history and system prompt are not. So the declaration travels
 // under an alias and the caller's name is restored on the way back.
 const GATED_TOOL_RE = /terminal/i
+// Claude Code 2.1.x ships a single tool name the gate treats as a foreign-agent
+// marker: `ReportFindings` beside `ScheduleWakeup`/`DeferredToolPlaceholder` is
+// answered 429, and the identical body passes once that one name is renamed —
+// so the gate reads the spelling, not the token (9router, probes 2026-10-29).
+// The alias must not CONTAIN the original: `reportfindings_client` still 429s.
+const FOREIGN_GATE_TOOL_ALIASES = new Map([["ReportFindings", "review_findings"]])
+
+function toolNameOf(tool) {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) return ""
+  const flat = typeof tool.name === "string" ? tool.name.trim() : ""
+  if (flat) return flat
+  const fn = tool.function
+  return fn && typeof fn === "object" && !Array.isArray(fn) && typeof fn.name === "string" ? fn.name.trim() : ""
+}
+
+function withToolName(tool, name) {
+  const fn = tool?.function
+  return fn && typeof fn === "object" && !Array.isArray(fn) ? { ...tool, function: { ...fn, name } } : { ...tool, name }
+}
+
+// Prior-turn calls have to follow a rename too, or the model sees its own
+// earlier call under the old name and cannot match it to the tool now offered.
+function renameHistoryCalls(messages, map) {
+  if (!Array.isArray(messages) || !map.size) return messages
+  const byOriginal = new Map([...map].map(([alias, original]) => [original, alias]))
+  for (const m of messages) {
+    if (Array.isArray(m?.tool_calls)) {
+      for (const call of m.tool_calls) {
+        const name = call?.function?.name
+        if (byOriginal.has(name)) call.function.name = byOriginal.get(name)
+      }
+    }
+    if (Array.isArray(m?.content)) {
+      for (const block of m.content) {
+        if (block?.type === "tool_use" && byOriginal.has(block.name)) block.name = byOriginal.get(block.name)
+      }
+    }
+  }
+  return messages
+}
+
+// Rename caller tool names the gate refuses to see (the `terminal` substring and
+// the fixed foreign-gate names) into `map`. Mutates `tools` in place and extends
+// the caller's sent-name -> original-name map. Kept separate from the pin/history
+// rewrites so the fingerprint pass can reuse it without a body.
+function aliasToolsInPlace(tools, map) {
+  const declared = new Set(tools.map(toolNameOf).filter(Boolean))
+  for (const t of tools) {
+    const name = toolNameOf(t)
+    if (!name) continue
+    // Substring gate words first ("terminal" — case-insensitive, matched on the
+    // name only: history text mentioning the word passes), then the fixed
+    // name aliases. Both ride the same rename/restore machinery. The alias must
+    // never contain the gate word (9router measured `reportfindings_client`
+    // still 429ing; the gate matches the spelling, not the token).
+    const alias = GATED_TOOL_RE.test(name) ? "run_command" : FOREIGN_GATE_TOOL_ALIASES.get(name)
+    if (!alias) continue
+    let unique = alias
+    for (let i = 2; declared.has(unique) || map.has(unique); i++) unique = `${alias}_${i}`
+    declared.add(unique)
+    map.set(unique, name)
+    if (t.function) t.function.name = unique
+    else t.name = unique
+  }
+  return map
+}
+
 function aliasGatedTools(body) {
-  const map = new Map()
   // A non-array "tools" ({} from a bad client) would make for-of throw and the
   // request hang without an answer.
-  const tools = Array.isArray(body?.tools) ? body.tools : []
-  const declared = new Set()
-  for (const t of tools) {
-    const f = t?.function ?? t
-    if (typeof f?.name === "string") declared.add(f.name)
-  }
-  for (const t of tools) {
-    const f = t?.function ?? t
-    const name = f?.name
-    if (typeof name !== "string" || !GATED_TOOL_RE.test(name)) continue
-    let alias = "run_command"
-    for (let i = 2; declared.has(alias) || map.has(alias); i++) alias = `run_command_${i}`
-    map.set(alias, name)
-    f.name = alias
-  }
+  const map = aliasToolsInPlace(Array.isArray(body?.tools) ? body.tools : [], new Map())
   if (!map.size) return map
   // The pin must follow its own tool: with two gated tools, forcing the first
   // alias calls whichever tool was declared first, not the one pinned. Every
@@ -1571,14 +2192,16 @@ function aliasGatedTools(body) {
     for (const [alias, original] of map) if (original === name) return alias
     return null
   }
+  const isGated = (n) => typeof n === "string" && (GATED_TOOL_RE.test(n) || FOREIGN_GATE_TOOL_ALIASES.has(n))
   const choice = body.tool_choice
-  if (typeof choice === "string" && GATED_TOOL_RE.test(choice)) {
+  if (typeof choice === "string" && isGated(choice)) {
     body.tool_choice = aliasFor(choice) ?? choice
-  } else if (choice?.function?.name && GATED_TOOL_RE.test(choice.function.name)) {
+  } else if (choice?.function?.name && isGated(choice.function.name)) {
     choice.function.name = aliasFor(choice.function.name) ?? choice.function.name
-  } else if (choice?.name && GATED_TOOL_RE.test(choice.name)) {
+  } else if (choice?.name && isGated(choice.name)) {
     choice.name = aliasFor(choice.name) ?? choice.name
   }
+  renameHistoryCalls(body.messages, map)
   return map
 }
 
@@ -1642,6 +2265,7 @@ async function handleMessages(req, res) {
   const fallbackAuth = config.proxyKey ? null : config.defaultZenKey ? `Bearer ${config.defaultZenKey}` : "Bearer public"
   let triedFallback = false
   let triedByok = false
+  let rotated429 = false
 
   let lastErr = null
   let lastStatus = 502
@@ -1671,7 +2295,7 @@ async function handleMessages(req, res) {
     // The gate's read stub, when the caller needs one, rides inside the
     // translated body (see anthropicToChatBody) — this must not inject again.
     const chatShaped = anthropicToChatBody(body, model)
-    const payload = format === "responses" ? responsesRequest(chatShaped, model, true) : withStreamUsage({ ...chatShaped, stream: true })
+    const payload = format === "responses" ? responsesRequest(chatShaped, model, true) : withStreamUsage({ ...chatShaped, stream: true }, model)
     // Callerless bridged request: the manifest and preamble are for the gate;
     // the answer to "summarize this" must be text, not a tool call.
     if (bridged) {
@@ -1686,7 +2310,7 @@ async function handleMessages(req, res) {
       let upstreamRes
       const wall = isStream ? headersWall() : null
       try {
-        upstreamRes = await fetch(`${config.upstream}${format === "responses" ? "/responses" : "/chat/completions"}`, {
+        upstreamRes = await upstreamFetch(`${config.upstream}${format === "responses" ? "/responses" : "/chat/completions"}`, {
           method: "POST",
           headers: zenHeaders(req, auth),
           body: JSON.stringify(payload),
@@ -1764,6 +2388,18 @@ async function handleMessages(req, res) {
         lastErr = { error: { type: "invalid_request_error", message: `upstream returned ${upstreamRes.status}` } }
       }
       lastStatus = upstreamRes.status
+      // A 429 here is a verdict on this egress flow, not on the model: the
+      // session id rides inside the TLS connection, so rotating the id alone
+      // keeps answering 429. Drop identity, TLS session and exit IP together
+      // before anything retries, so the next attempt (same model, next
+      // candidate, or BYOK) arrives on a fresh flow.
+      if (upstreamRes.status === 429) {
+        const nextProxy = rotateEgress(req)
+        if (!rotated429) {
+          rotated429 = true
+          log(`   429 — rotated identity + TLS session${nextProxy ? " → " + maskProxyUrl(nextProxy) : " (no proxy listed: same exit IP)"}`)
+        }
+      }
       // The one 429 that is the caller's own spent allowance: retry the same
       // attempt under the configured key before the chain moves on. Same
       // attempt budget (attempt-- mirrors the 401 fallback above), once per
@@ -1865,6 +2501,7 @@ async function handleChat(req, res, responsesRoute = false) {
   const fallbackAuth = config.proxyKey ? null : config.defaultZenKey ? `Bearer ${config.defaultZenKey}` : "Bearer public"
   let triedFallback = false
   let triedByok = false
+  let rotated429 = false
   let lastErr = null
   let lastStatus = 502
   let firstErr = null
@@ -1874,18 +2511,34 @@ async function handleChat(req, res, responsesRoute = false) {
   // against that same model before the chain moves on.
   const retries = config.retriesPerModel > 0 ? Math.floor(config.retriesPerModel) : 0
   // The gate refuses any request that does not carry opencode's own tool
-  // manifest — a caller with its own tools used to ride on a bare `read` stub
-  // and now gets refused too. The manifest goes on every request, ahead of the
-  // caller's tools; a caller tool whose name collides with a manifest name is
-  // dropped in favour of the gate's own schema (the reply layer renames and
-  // remaps manifest calls back to the caller's equivalent — see
-  // remapAgentTool — and `Read`/`read` do not collide by case).
+  // manifest. Caller tools ride first, then the manifest fills in what is
+  // missing: a caller tool named `read`/`shell` keeps its own definition
+  // (normalized in place when its arguments allow) rather than being dropped in
+  // favour of a duplicate, and the manifest's remaining tools are appended. The
+  // reply layer renames and remaps manifest calls back to the caller's
+  // equivalent — see remapAgentTool — and `Read`/`read` do not collide by case.
   const bridge = gateBridgeTools()
   const callerTools = Array.isArray(chatBody.tools) ? chatBody.tools : []
-  const manifestNames = new Set(bridge.map((t) => t?.function?.name))
-  const mergedTools = bridge.length
-    ? [...bridge, ...callerTools.filter((t) => !manifestNames.has(t?.function?.name ?? t?.name))]
-    : callerTools
+  // A copy: the fingerprint pass appends to the array it is given, and mutating
+  // chatBody.tools would make a tool-less caller stop looking tool-less (the
+  //  flag and its tool_choice:"none" pin are read from it later).
+  // A copy for the same reason: applyFingerprintTools appends to the array it
+  // is handed, so passing chatBody.tools directly would make every caller look
+  // tool-carrying and silently un-pin the bridged tool_choice.
+  const { tools: fingerprintTools } = bridge.length
+    ? applyFingerprintTools([...callerTools], false)
+    : { tools: callerTools }
+  const allTools = bridge.length ? [...bridge, ...fingerprintTools] : callerTools
+  // One name, one declaration: upstream rejects duplicates, and a manifest tool
+  // the caller already carries is already satisfied by that caller tool.
+  const mergedTools = []
+  const takenNames = new Set()
+  for (const t of allTools) {
+    const n = t?.function?.name ?? t?.name
+    if (!n || takenNames.has(n)) continue
+    takenNames.add(n)
+    mergedTools.push(t)
+  }
   const requestBody = bridge.length ? { ...chatBody, tools: mergedTools } : chatBody
   // Same as before: the pin is the caller's own request; only a callerless
   // bridged request changes `tool_choice` (see the loop below).
@@ -1904,7 +2557,7 @@ async function handleChat(req, res, responsesRoute = false) {
     // Streams upstream regardless of what the client asked for — see
     // collectChatCompletion — and the collector puts the shape back.
     const payload =
-      format === "responses" ? responsesRequest(requestBody, model, true) : withStreamUsage({ ...requestBody, model, stream: true })
+      format === "responses" ? responsesRequest(requestBody, model, true) : withStreamUsage({ ...requestBody, model, stream: true }, model)
     // A Responses body that reaches a responses-family model keeps its input
     // verbatim: the chat round-trip above preserves mostly everything, but
     // content parts do not survive it losslessly — an input_image next to
@@ -1915,12 +2568,12 @@ async function handleChat(req, res, responsesRoute = false) {
       const preamble = bridgePreamble()
       const caller = typeof body.instructions === "string" && body.instructions
       const instructions = caller
-        ? (caller.startsWith(PREAMBLE_MARKER) ? caller : `${preamble}\n\n${caller}`)
+        ? (caller.includes("<env>") ? caller : `${preamble}\n\n${caller}`)
         : preamble
       payload.input =
         instructions
-          ? [{ type: "message", role: "system", content: instructions }, ...responsesInputItemArray(body.input)]
-          : responsesInputItemArray(body.input)
+          ? [{ type: "message", role: "system", content: instructions }, ...sanitizeResponsesItems(responsesInputItemArray(body.input))]
+          : sanitizeResponsesItems(responsesInputItemArray(body.input))
     }
     // A callerless bridged request (title generators, plain API pings): the
     // manifest is for the gate, not the answer — the ask is text, so the
@@ -1940,7 +2593,7 @@ async function handleChat(req, res, responsesRoute = false) {
       let upstreamRes
       const wall = isStream ? headersWall() : null
       try {
-        upstreamRes = await fetch(`${config.upstream}${format === "responses" ? "/responses" : "/chat/completions"}`, {
+        upstreamRes = await upstreamFetch(`${config.upstream}${format === "responses" ? "/responses" : "/chat/completions"}`, {
           method: "POST",
           headers: zenHeaders(req, auth),
           body: JSON.stringify(payload),
@@ -2049,6 +2702,16 @@ async function handleChat(req, res, responsesRoute = false) {
         lastErr = { error: { type: "invalid_request_error", message: `upstream returned ${upstreamRes.status}` } }
       }
       lastStatus = upstreamRes.status
+      // Same rotation as the Anthropic loop: a 429 is a verdict on the egress
+      // flow (TLS connection × exit IP), so identity, TLS session and exit IP
+      // move together before the retry ladder continues.
+      if (upstreamRes.status === 429) {
+        const nextProxy = rotateEgress(req)
+        if (!rotated429) {
+          rotated429 = true
+          log(`   429 — rotated identity + TLS session${nextProxy ? " → " + maskProxyUrl(nextProxy) : " (no proxy listed: same exit IP)"}`)
+        }
+      }
       // Same BYOK escalation as the Anthropic loop: a genuinely spent identity
       // ("Free usage limit reached") retries the same attempt under the
       // configured key — once per request, no extra attempt budget, no shared
@@ -2834,14 +3497,26 @@ function relayStream(req, res, upstreamRes, requested, strip = false, pin = null
 // reply, so `stream_options` has to be requested here rather than forwarded
 // from a caller who never asked to stream. Without it the gateway sends no
 // usage chunk at all and every collected reply reported zero tokens.
-function withStreamUsage(body) {
+function withStreamUsage(body, model = body.model) {
   const opts = body.stream_options && typeof body.stream_options === "object" ? body.stream_options : {}
-  return { ...body, stream_options: { ...opts, include_usage: true } }
+  const out = { ...body, stream_options: { ...opts, include_usage: true } }
+  // The chat endpoint validates reasoning_effort against a strict enum and 400s
+  // "Invalid option" for anything else — including "auto", which adaptive
+  // thinking arrives as, and Claude Code's "ultra". Omit "auto" (that is what
+  // adaptive means: the model picks), and map the rest into what this model
+  // actually serves. 9router does the same two steps for the same reason.
+  const effort = normalizeEffort(out.reasoning_effort, model)
+  if (effort) out.reasoning_effort = effort
+  else delete out.reasoning_effort
+  return out
 }
 
 // Build a Responses API request from a chat.completions body.
 function responsesRequest(body, model, isStream) {
-  const payload = { model, input: chatMessagesToInput(body.messages), stream: !!isStream }
+  // `store:false` matches the CLI (9router forces it too): a server-stored
+  // response belongs to the account that created it, and `Bearer public` is a
+  // pool — a later turn can land on another account and 404 the reference.
+  const payload = { model, input: chatMessagesToInput(body.messages), stream: !!isStream, store: false }
   if (body.temperature != null) payload.temperature = body.temperature
   if (body.top_p != null) payload.top_p = body.top_p
   if (body.parallel_tool_calls != null) payload.parallel_tool_calls = body.parallel_tool_calls
@@ -2856,7 +3531,69 @@ function responsesRequest(body, model, isStream) {
   // Only forward a budget the caller actually asked for.
   const mt = body.max_completion_tokens ?? body.max_tokens
   if (mt != null && Number.isFinite(Number(mt)) && Number(mt) > 0) payload.max_output_tokens = Number(mt)
+  // The Responses endpoint takes thinking as reasoning:{effort,summary} and
+  // rejects `reasoning_effort` outright ("unknown variant"). Chat callers and
+  // Anthropic's thinking:{type:"enabled",budget_tokens} both arrive in shapes
+  // it will not read, so normalize here or the caller silently loses thinking.
+  const reasoning = responsesReasoning(body, model)
+  if (reasoning) payload.reasoning = reasoning
   return payload
+}
+
+// Reasoning levels this gateway actually serves, per model family. Transcribed
+// from 9router's thinkingLevels table for the free ids; `null` means "forward
+// whatever the caller asked" — unknown models are not ours to clamp.
+const THINKING_LEVELS = [
+  [/deepseek-v4\.1-flash-free/, ["low", "high", "max"]],
+  [/mimo.*v2\.6/, ["none", "minimal", "low", "medium", "high", "xhigh", "max"]],
+  [/deepseek-v4\./, ["none", "low", "medium", "high", "xhigh", "max"]],
+  [/gpt-5|gpt-6|muse-spark|grok-/, ["none", "minimal", "low", "medium", "high", "xhigh", "max"]],
+]
+function thinkingLevelsFor(model) {
+  const id = String(model ?? "")
+  for (const [re, levels] of THINKING_LEVELS) if (re.test(id)) return levels
+  return null
+}
+
+// "ultra" is Claude Code's top tier and does not exist upstream; map down to
+// the best level the model does serve, exactly as 9router does. "auto" means
+// "let the model decide", which is the same as sending nothing.
+function normalizeEffort(effort, model) {
+  let e = String(effort ?? "").toLowerCase().trim()
+  if (!e || e === "auto") return null
+  const levels = thinkingLevelsFor(model)
+  if (!levels) return e
+  if (levels.includes(e)) return e
+  if (e === "ultra" || e === "max") {
+    if (levels.includes("max")) return "max"
+    if (levels.includes("xhigh")) return "xhigh"
+    if (levels.includes("high")) return "high"
+  }
+  // An unsupported level is a 400 upstream; the nearest lower tier is the
+  // honest reading of what the caller asked for.
+  const order = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+  const want = order.indexOf(e)
+  if (want < 0) return levels[levels.length - 1]
+  for (let i = want; i >= 0; i--) if (levels.includes(order[i])) return order[i]
+  return levels[0]
+}
+
+// Chat-shaped body -> the Responses `reasoning` object (or null for none).
+// `model` is passed explicitly: the body may still name the caller's alias
+// while the loop is already serving a different candidate.
+function responsesReasoning(body, model = body?.model) {
+  const current = body?.reasoning && typeof body.reasoning === "object" && !Array.isArray(body.reasoning) ? body.reasoning : null
+  let effort = body?.reasoning_effort ?? current?.effort
+  // Anthropic thinking:{type:"enabled",budget_tokens}: no effort enum, only a
+  // token budget. Map it onto the tiers so adaptive thinking does not vanish.
+  if (!effort && body?.thinking && typeof body.thinking === "object") {
+    if (body.thinking.type === "disabled") return null
+    const b = Number(body.thinking.budget_tokens)
+    effort = !Number.isFinite(b) ? "medium" : b <= 2048 ? "low" : b <= 8192 ? "medium" : b <= 24576 ? "high" : "max"
+  }
+  const normalized = normalizeEffort(effort, model)
+  if (!normalized) return null
+  return { ...(current ?? {}), effort: normalized, summary: current?.summary || "auto" }
 }
 
 // Credentials used by the auto-sync health probe. Lets a user probe the
@@ -2935,7 +3672,7 @@ async function probeModel(id, auth) {
     headers["x-session-id"] = session
   }
   if (config.tracing) for (const [k, v] of Object.entries(traceHeaders())) headers[k] = v
-  const r = await fetch(`${config.upstream}${format === "responses" ? "/responses" : "/chat/completions"}`, {
+  const r = await upstreamFetch(`${config.upstream}${format === "responses" ? "/responses" : "/chat/completions"}`, {
     method: "POST",
     headers,
     body: JSON.stringify(agentProbePayload(id, format)),
@@ -3431,7 +4168,7 @@ async function fetchModels() {
   if (modelsFetching) return modelsFetching
   modelsFetching = (async () => {
     try {
-      const res = await fetch(`${MODEL_LIST_BASE}/models`, {
+      const res = await upstreamFetch(`${MODEL_LIST_BASE}/models`, {
         headers: { "user-agent": config.ua },
         signal: AbortSignal.timeout(15_000),
       })
@@ -3469,7 +4206,7 @@ async function syncModels() {
   syncState.at = Date.now()
   const start = Date.now()
   try {
-    const res = await fetch(`${MODEL_LIST_BASE}/models`, {
+    const res = await upstreamFetch(`${MODEL_LIST_BASE}/models`, {
       headers: { "user-agent": config.ua },
       signal: AbortSignal.timeout(15_000),
     })
@@ -3815,6 +4552,9 @@ async function handleApiConfig(req, res) {
       cleaned.autoSync = toBool(cleaned.autoSync, config.autoSync)
       cleaned.autoUA = toBool(cleaned.autoUA, config.autoUA)
       cleaned.injectSession = toBool(cleaned.injectSession, config.injectSession)
+      cleaned.proxyStrict = toBool(cleaned.proxyStrict, config.proxyStrict)
+      if (!Array.isArray(cleaned.proxyUrls)) cleaned.proxyUrls = config.proxyUrls
+      else cleaned.proxyUrls = cleaned.proxyUrls.filter((u) => typeof u === "string" && u.trim())
       if (cleaned.proxyKey === "••••••••") cleaned.proxyKey = config.proxyKey
       if (cleaned.probeAuth != null && !["auto", "key", "anonymous"].includes(String(cleaned.probeAuth))) {
         cleaned.probeAuth = "auto"
@@ -3930,7 +4670,7 @@ async function handleTest(req, res) {
         ? `Bearer ${body.zenKey.trim()}`
         : (authForUpstream(req) ?? "Bearer public")
     const format = modelFormat(model)
-    const upstreamRes = await fetch(`${config.upstream}${format === "responses" ? "/responses" : "/chat/completions"}`, {
+    const upstreamRes = await upstreamFetch(`${config.upstream}${format === "responses" ? "/responses" : "/chat/completions"}`, {
       method: "POST",
       headers: (() => {
         const h = {
@@ -4168,17 +4908,24 @@ if (isMain) {
     log(`zen-proxy listening on http://${config.host}:${config.port}`)
     log(`upstream ${config.upstream}  UA ${config.ua}  default ${config.defaultModel || "(auto)"}`)
     log(`config file: ${CONFIG_PATH}  UI: /`)
-    // The free-tier gate fingerprints the TLS/HTTP stack; since the v2 gateway
-    // this is load-bearing, not cosmetic — an identical request that streams
-    // 200 under Bun's fetch is bucketed `429 FreeUsageLimitError` from Node's.
-    // Everything else (headers, session mint, body realism) is duplicated here,
-    // so a node:start is the one thing left that changes the verdict.
-    if (typeof Bun === "undefined") {
-      log("")
-      log("⚠  Running under Node. The free-tier gate 429s Node's TLS stack")
-      log("   (FreeUsageLimitError) even for agent-shaped requests. Run under")
-      log("   Bun instead:  bun zen-proxy.mjs   (see README)")
-      log("")
+    // The gate fingerprints the TLS stack, and the proxy no longer depends on
+    // the runtime for it: wreq-js dials with Bun's ClientHello either way. Say
+    // which transport this process actually got, once, at boot.
+    if (!TLS_ENABLED) {
+      log("TLS transport disabled (ZEN_TLS=0) — free-tier requests will be")
+      log("refused with 429 unless a Zen key is configured.")
+    } else {
+      loadWreq()
+        .then(() => log("TLS transport: wreq-js (Bun ClientHello profile)"))
+        .catch((err) => log(`⚠  ${err.message}`))
+      const list = proxyList()
+      if (list.length) {
+        log(`egress: ${list.length} proxy${list.length === 1 ? "" : " list"}${config.proxyStrict ? " (strict)" : ""} — ${list.map(maskProxyUrl).join(", ")}`)
+        // A 429 rotates the session and re-dials, but a single exit IP is a
+        // single bucket: re-dialling it lands on the same one. Say it once
+        // rather than letting "rotation" imply more than it delivers.
+        if (list.length === 1) log("   one proxy = one exit IP, so a 429 retry hits the same bucket; add more entries to rotate")
+      }
     }
     if (!fs.existsSync(CONFIG_PATH)) {
       try {
@@ -4221,6 +4968,10 @@ export {
   effectiveDefault,
   modelFormat,
   responsesRequest,
+  responsesReasoning,
+  sanitizeResponsesItems,
+  normalizeEffort,
+  withStreamUsage,
   responsesToChat,
   responsesEventToDeltas,
   usageToChat,
@@ -4235,6 +4986,7 @@ export {
   clientIp,
   ipOmit,
   zenHeaders,
+  upstreamUserAgent,
   recordReq,
   requestStats,
   syncState,
@@ -4248,6 +5000,10 @@ export {
   remapAgentTool,
   loadAgentTools,
   AGENT_TOOL_MAP,
+  applyFingerprintTools,
+  concealFingerprintToolNames,
+  appendMissingFingerprintTools,
+  fingerprintToolKey,
   relayStream,
   relayAnthropicStream,
   relayResponsesStream,
@@ -4277,7 +5033,14 @@ export {
   toBool,
   identityFor,
   sessionFor,
+  genSessionId,
+  translateSessionId,
+  OPENCODE_SESSION_RE,
   SESSION_MAX_AGE_MS,
+  OPENCODE_CIPHERS,
+  OPENCODE_TLS_PROFILE,
+  resetTlsSession,
+  upstreamFetch,
   MAX_BODY,
   VALID_MODEL_ID,
 }

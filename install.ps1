@@ -7,7 +7,7 @@
 # Env options:
 #   ZEN_PROXY_REPO   GitHub "owner/repo" (default: 12errh/zen-proxy)
 #   ZEN_PROXY_DIR    install directory (default: $HOME\.zen-proxy)
-#   ZEN_PROXY_PORT   default port (default: 8787)
+#   ZEN_PROXY_PORT   default port (default: 8181)
 
 param(
   [string]$LocalSrc = ""
@@ -19,7 +19,7 @@ if (-not $Repo) { $Repo = "12errh/zen-proxy" }
 $InstallDir = $env:ZEN_PROXY_DIR
 if (-not $InstallDir) { $InstallDir = Join-Path $HOME ".zen-proxy" }
 $Port = $env:ZEN_PROXY_PORT
-if (-not $Port) { $Port = "8787" }
+if (-not $Port) { $Port = "8181" }
 
 function Info($m) { Write-Host $m -ForegroundColor Green }
 function Die($m) { Write-Host $m -ForegroundColor Red; exit 1 }
@@ -68,6 +68,22 @@ if ($CfgBak -and (Test-Path $CfgBak)) {
 
 if (-not (Test-Path (Join-Path $InstallDir "zen-proxy.mjs"))) {
   Die "zen-proxy.mjs not found after install - check ZEN_PROXY_REPO"
+}
+
+# TLS transport. The free tier fingerprints the ClientHello, and native Node
+# fetch is bucketed `429 FreeUsageLimitError` even for agent-shaped requests;
+# wreq-js ships Bun 1.3.14's exact BoringSSL profile in-process, so the
+# anonymous tier works under node. Optional at runtime: a failed install only
+# costs anonymous access, so warn instead of failing.
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+  Info "Installing the TLS transport (wreq-js)..."
+  Push-Location $InstallDir
+  try {
+    npm install --omit=dev --no-audit --no-fund --loglevel=error
+    if ($LASTEXITCODE -ne 0) { Write-Host "npm install failed - rerun: cd `"$InstallDir`"; npm install wreq-js" -ForegroundColor Yellow }
+  } finally { Pop-Location }
+} else {
+  Info "npm not found - anonymous free-tier access needs it: cd `"$InstallDir`"; npm install wreq-js"
 }
 
 if (-not (Test-Path $ConfigPath)) {
