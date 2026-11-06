@@ -1,11 +1,11 @@
 # Zen Proxy installer for Windows (PowerShell)
 # Usage (run in PowerShell):
-#   irm https://raw.githubusercontent.com/12errh/zen-proxy/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/jeffpecky/zen-proxy/main/install.ps1 | iex
 #   # or, from a local checkout:
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -LocalSrc C:\path\to\zen-proxy
 #
 # Env options:
-#   ZEN_PROXY_REPO   GitHub "owner/repo" (default: 12errh/zen-proxy)
+#   ZEN_PROXY_REPO   GitHub "owner/repo" (default: jeffpecky/zen-proxy)
 #   ZEN_PROXY_DIR    install directory (default: $HOME\.zen-proxy)
 #   ZEN_PROXY_PORT   default port (default: 8181)
 
@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Repo = $env:ZEN_PROXY_REPO
-if (-not $Repo) { $Repo = "12errh/zen-proxy" }
+if (-not $Repo) { $Repo = "jeffpecky/zen-proxy" }
 $InstallDir = $env:ZEN_PROXY_DIR
 if (-not $InstallDir) { $InstallDir = Join-Path $HOME ".zen-proxy" }
 $Port = $env:ZEN_PROXY_PORT

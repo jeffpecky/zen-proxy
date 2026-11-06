@@ -36,11 +36,11 @@
 ### Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/12errh/zen-proxy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jeffpecky/zen-proxy/main/install.sh | bash
 ```
 
 ```powershell
-irm https://raw.githubusercontent.com/12errh/zen-proxy/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/jeffpecky/zen-proxy/main/install.ps1 | iex
 ```
 
 <sub>That is the entire installation — no account, no API key, no `npm install`. Now pick your agent below.</sub>
@@ -264,8 +264,8 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc      # permanent
 </p>
 
 <p align="center">
-  <a href="https://github.com/12errh/zen-proxy/issues">
-    <img src="https://img.shields.io/github/issues/12errh/zen-proxy?style=flat-square&labelColor=1a1612&color=8b8b8b" alt="Open issues">
+  <a href="https://github.com/jeffpecky/zen-proxy/issues">
+    <img src="https://img.shields.io/github/issues/jeffpecky/zen-proxy?style=flat-square&labelColor=1a1612&color=8b8b8b" alt="Open issues">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-8b8b8b?style=flat-square&labelColor=1a1612" alt="MIT License">

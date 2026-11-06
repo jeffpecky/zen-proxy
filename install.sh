@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Zen Proxy installer for Linux & macOS
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/12errh/zen-proxy/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jeffpecky/zen-proxy/main/install.sh | bash
 #   # or, from a local checkout:
 #   bash install.sh --local /path/to/zen-proxy
 #
 # Env options:
-#   ZEN_PROXY_REPO   GitHub "owner/repo" (default: 12errh/zen-proxy)
+#   ZEN_PROXY_REPO   GitHub "owner/repo" (default: jeffpecky/zen-proxy)
 #   ZEN_PROXY_DIR    install directory (default: ~/.zen-proxy)
 #   ZEN_PROXY_PORT   default port (default: 8181)
 
 set -euo pipefail
 
-REPO="${ZEN_PROXY_REPO:-12errh/zen-proxy}"
+REPO="${ZEN_PROXY_REPO:-jeffpecky/zen-proxy}"
 INSTALL_DIR="${ZEN_PROXY_DIR:-$HOME/.zen-proxy}"
 PORT="${ZEN_PROXY_PORT:-8181}"
 LOCAL_SRC=""
