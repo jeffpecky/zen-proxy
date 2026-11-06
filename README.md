@@ -99,7 +99,7 @@ It stays up until you stop it, so you point your agent at it once and keep using
 | `GET /v1/models` | What's live right now |
 | Automatic fallback | Retries the next free model on `429` / `5xx` / unavailable |
 | Model aliases | Call it `gpt-4o`, get a free model back |
-| Auth | Anonymous `Bearer public`, or bring your own Zen key |
+| Auth | Anonymous `Bearer public` (loopback), or a minted `sk-…` key, or bring your own Zen key |
 | Dashboard | `http://127.0.0.1:8181/` |
 
 The free-model catalog in [`models.json`](models.json) is refreshed from OpenCode's public catalog by a GitHub Action every 6 hours.
@@ -171,7 +171,8 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 | `modelAliases` | `{}` | e.g. `{"gpt-4o": "space-bunny-free"}` |
 | `responsesModels` | `["gpt-5*","gpt-6*","grok-*","muse-spark-*"]` | Models served on `/v1/responses`; patterns may end in `*` |
 | `defaultZenKey` | `""` | Your own Zen key instead of anonymous `public`; a 429 that says the *identity's* free allowance is spent ("Free usage limit reached") retries that same attempt once under this key before walking the chain — the shared-bucket cooldown never escalates |
-| `proxyKey` | `""` | Require this from clients (`Authorization: Bearer` or `x-api-key`); also locks the dashboard and `/api/*`. It is the proxy's own secret — never sent upstream |
+| `proxyKey` | `""` | Require this from clients (`Authorization: Bearer` or `x-api-key`); also locks the dashboard and `/api/*`. It is the proxy's own secret — never sent upstream. On a non-loopback bind with nothing set, a `sk-…` key is **generated at boot** and printed once |
+| `requireApiKey` | `false` | Force auth even on a loopback bind behind a reverse proxy (`REQUIRE_API_KEY=1`) |
 | `rateLimitMax` / `rateLimitWindowMs` | `0` (off) / `60000` | Per-client rate limiting; local callers are split by user-agent family so several agents behind the same address do not share one budget |
 | `timeoutMs` / `cacheMs` | `120000` / `30000` | Upstream *silence* timeout (re-armed on every chunk, so long replies are not cut), `/v1/models` cache TTL |
 | `autoSync` / `autoSyncIntervalMs` | `true` / `3600000` | Runtime discovery of newly-offered free models |
@@ -179,7 +180,11 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 
 **Caller identity.** Upstream ties free usage to a session+project pair, not to a key: one pair reads as one CLI conversation in one project. The proxy keeps that story coherent instead of stretching a single anonymous session for everyone — each caller bucket (source IP + user-agent family, versions normalized away) gets its own pair, minted together and rotated together on a 30-minute schedule, so two agents on one machine read as two CLI conversations rather than one marathon session. A client that sends its own `x-opencode-session` / `x-opencode-project` keeps them untouched, and `projectHash` pins the project half for anonymous callers. Every forwarded request leaves one `/api/logs` line carrying the session id's head and tail and its injected/client origin, so rotation is observable. On a `429` the pair is re-minted and the pooled TLS connection closed together (see above), so a drained bucket is not inherited by the retry. This redistributes identical total usage across more honest identities — and it deliberately stops there: caller IPs are never rotated (the free tier is per-IP; `trustForwarded` alone governs how real IPs travel), so per-IP usage accounting is left exactly as opencode counts it.
 
-`HOST` `PORT` `ZEN_URL` `ZEN_UA` `ZEN_CLIENT` `ZEN_PROJECT_HASH` `ZEN_TRACING=0` `INJECT_SESSION=0` `AUTO_UA=0` `UA_REFRESH_MS` `AGENT_TOOLS=0` `AGENT_PREAMBLE=off` `ZEN_PROXY_AGENT_TOOLS` `ZEN_PROXY_AGENT_PREAMBLE` `ZEN_TLS=0` `ZEN_PROXY_WREQ` `PROBE_AUTH` `DEFAULT_MODEL` `FALLBACK_MODELS` `MODEL_ALIASES` `RESPONSES_MODELS` `PROXY_KEY` `ZEN_KEY` `TRUST_FORWARDED=1` `TIMEOUT_MS` `CACHE_MS` `RATE_LIMIT_MAX` `RATE_LIMIT_WINDOW_MS` `AUTO_SYNC=0` `AUTO_SYNC_MS` `ZEN_PROXY_CONFIG`
+`HOST` `PORT` `ZEN_URL` `ZEN_UA` `ZEN_CLIENT` `ZEN_PROJECT_HASH` `ZEN_TRACING=0` `INJECT_SESSION=0` `AUTO_UA=0` `UA_REFRESH_MS` `AGENT_TOOLS=0` `AGENT_PREAMBLE=off` `ZEN_PROXY_AGENT_TOOLS` `ZEN_PROXY_AGENT_PREAMBLE` `ZEN_TLS=0` `ZEN_PROXY_WREQ` `PROBE_AUTH` `DEFAULT_MODEL` `FALLBACK_MODELS` `MODEL_ALIASES` `RESPONSES_MODELS` `PROXY_KEY` `REQUIRE_API_KEY` `ZEN_KEY` `TRUST_FORWARDED=1` `TIMEOUT_MS` `CACHE_MS` `RATE_LIMIT_MAX` `RATE_LIMIT_WINDOW_MS` `AUTO_SYNC=0` `AUTO_SYNC_MS` `ZEN_PROXY_CONFIG`
+
+**Client keys (`sk-…`).** A hand-typed `proxyKey` on a public VPS is a brute-force target, so zen-proxy can mint CSPRNG keys instead — `sk-` + 43 base64url chars (256 bits), in the dashboard's **Client keys** tab or `POST /api/keys`. Modelled on 9router's key lifecycle, hardened for a public host: only the **SHA-256** is stored (9router keeps keys plaintext), resolved with a constant-time compare, and the plaintext is shown exactly once at mint — the dashboard shows a copy dialog for it, then never again. Revoke anytime (`DELETE /api/keys?id=…`); callers holding the key get `401` immediately. Both the proxy key and minted keys also unlock the dashboard and `/api/*`. Any valid key is accepted for inference — this is a single-user proxy with several revocable credentials, not multi-tenant.
+
+`PROXY_KEY` `REQUIRE_API_KEY=1` — added to the env list above.
 
 Anonymous `public` access shares a per-IP quota that is sometimes saturated. Set `defaultZenKey`, or send `x-zen-key` per request, for steadier service.
 </details>
@@ -205,6 +210,7 @@ Anonymous `public` access shares a per-IP quota that is sometimes saturated. Set
 | `GET` | `/health` | Health check (never calls upstream; reports the last known catalog state) |
 | `GET` | `/` | Dashboard |
 | `GET`/`PUT` | `/api/config` | Read / update configuration |
+| `GET`/`POST`/`DELETE` | `/api/keys` | List / mint / revoke client keys (`DELETE /api/keys?id=…`) |
 | `GET` | `/api/status` | Stats and upstream health |
 | `POST` | `/api/test` | Test one model — `{"model":"..."}` |
 | `GET` | `/api/logs` | Log tail |
