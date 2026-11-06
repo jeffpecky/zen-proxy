@@ -171,7 +171,7 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 | `modelAliases` | `{}` | e.g. `{"gpt-4o": "space-bunny-free"}` |
 | `responsesModels` | `["gpt-5*","gpt-6*","grok-*","muse-spark-*"]` | Models served on `/v1/responses`; patterns may end in `*` |
 | `defaultZenKey` | `""` | Your own Zen key instead of anonymous `public`; a 429 that says the *identity's* free allowance is spent ("Free usage limit reached") retries that same attempt once under this key before walking the chain — the shared-bucket cooldown never escalates |
-| `adminPassword` | `""` | Dashboard login only (`ADMIN_PASSWORD`). Opens `/` and `/api/*`; **does not** authenticate model calls. Empty + loopback = open dashboard |
+| `adminPassword` | `""` (no default) | Dashboard login only (`ADMIN_PASSWORD`). Opens `/` and `/api/*`; **does not** authenticate model calls. Empty + loopback = open dashboard; empty + any other bind = generated at boot and printed once |
 | `apiKeys` | `[]` | Client keys (`sk-…`) that authenticate **model calls**. Managed in Settings → Client keys or `POST /api/keys`; stored only as SHA-256. **Not** a dashboard login |
 | `requireApiKey` | `false` | Force auth even on a loopback bind behind a reverse proxy (`REQUIRE_API_KEY=1`) |
 | `rateLimitMax` / `rateLimitWindowMs` | `0` (off) / `60000` | Per-client rate limiting; local callers are split by user-agent family so several agents behind the same address do not share one budget |

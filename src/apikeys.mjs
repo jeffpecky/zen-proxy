@@ -127,7 +127,9 @@ export function ensureDefaultKey() {
   if (!authRequired()) return null
   const out = {}
   if (!config.adminPassword) {
-    out.adminPassword = KEY_PREFIX + randomBytes(KEY_BYTES).toString("base64url")
+    // A password, not an API key: no `sk-` prefix, and never resolved by
+    // resolveApiKey() — a bare random string can only open the dashboard.
+    out.adminPassword = randomBytes(18).toString("base64url")
     saveConfig({ adminPassword: out.adminPassword })
   }
   if (!config.apiKeys.length) {
