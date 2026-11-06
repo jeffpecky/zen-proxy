@@ -1,5 +1,5 @@
 // Dashboard and admin routes, including their auth and origin guards.
-import { authRequired, createApiKey, listApiKeys, resolveApiKey, revokeApiKey } from "../apikeys.mjs"
+import { authRequired, createApiKey, dashboardAuthRequired, listApiKeys, revokeApiKey } from "../apikeys.mjs"
 // re-exported below for the router
 import { loadShippedModels } from "../catalogs.mjs"
 import { DEFAULT_CONFIG, config, isFallbackModelsPinned, maskKey, sanitize, saveConfig, setFallbackModelsPinned } from "../config.mjs"
@@ -21,15 +21,18 @@ async function handleModels(req, res) {
 }
 
 
-// Any credential this proxy accepts for inference is also the admin secret: this
-// is a single-user install, so "has a valid key" and "is the operator" are the
-// same question. Keys are only mintable by someone who already holds one.
+// The dashboard credential. Deliberately separate from the client API keys:
+// an `sk-…` key is a model-call credential (same as 9router/OpenRouter/Zen
+// keys) and must NOT log anyone into the UI — holding an inference key would
+// otherwise be a config takeover on a shared deploy. Only `adminPassword`
+// opens the dashboard and `/api/*`.
 // A loopback install with nothing configured keeps the open dashboard it has
-// always had; the moment a credential exists it must be presented.
+// always had; the moment auth is on, the password must be presented.
 function adminAuth(req, res) {
   const presented = bearer(req) || apiKeyHeader(req)
-  if (resolveApiKey(presented)) return true
-  if (authRequired()) {
+  const password = String(config.adminPassword ?? "")
+  if (password && safeEqual(presented, password)) return true
+  if (dashboardAuthRequired()) {
     json(res, 401, { error: "unauthorized" })
     return false
   }
@@ -144,7 +147,7 @@ async function handleApiConfig(req, res) {
       cleaned.requireApiKey = toBool(cleaned.requireApiKey, config.requireApiKey)
       if (!Array.isArray(cleaned.proxyUrls)) cleaned.proxyUrls = config.proxyUrls
       else cleaned.proxyUrls = cleaned.proxyUrls.filter((u) => typeof u === "string" && u.trim())
-      if (cleaned.proxyKey === "••••••••") cleaned.proxyKey = config.proxyKey
+      if (cleaned.adminPassword === "••••••••") cleaned.adminPassword = config.adminPassword
       if (cleaned.probeAuth != null && !["auto", "key", "anonymous"].includes(String(cleaned.probeAuth))) {
         cleaned.probeAuth = "auto"
       }
@@ -237,7 +240,7 @@ async function handleStatus(req, res) {
   for (const [m, c] of requestStats.perMinute) {
     if (minute - m <= 5) last5m += c
   }
-  const authMode = config.defaultZenKey ? (config.proxyKey ? "proxy+byok" : "byok") : config.proxyKey ? "proxy" : "public"
+  const authMode = config.defaultZenKey ? (config.apiKeys.length ? "key+byok" : "byok") : config.apiKeys.length ? "key" : "public"
   json(res, 200, {
     uptime: Math.floor(process.uptime()),
     upstreamOk: cache.ok,
@@ -246,7 +249,7 @@ async function handleStatus(req, res) {
     uaAutoVersion: uaAutoState.version,
     defaultModel: config.defaultModel,
     effectiveDefault: effectiveDefault(),
-    auth: { mode: authMode, zenKey: maskKey(config.defaultZenKey), proxyKey: !!config.proxyKey, apiKeys: config.apiKeys.length, required: authRequired() },
+    auth: { mode: authMode, zenKey: maskKey(config.defaultZenKey), adminPassword: !!config.adminPassword, apiKeys: config.apiKeys.length, required: authRequired() },
     responsesModels: [...(config.responsesModels ?? [])],
     rateLimit: { max: config.rateLimitMax, windowMs: config.rateLimitWindowMs },
     probeAuth: config.probeAuth ?? "auto",

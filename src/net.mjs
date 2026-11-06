@@ -92,20 +92,18 @@ function apiKeyHeader(req) {
 // Anthropic and the OpenAI-shaped routes call this, so a token can never be
 // usable on one route and meaningless on the other.
 //
-// With `proxyKey` set the caller must present it — as a bearer token or as
-// `x-api-key` — and the proxy key itself is NEVER an upstream credential: it is
-// the proxy's own secret, and forwarding it would hand that secret to the
-// free-tier gateway (the Claude Code setup sends the proxy key in `x-api-key`,
-// which used to travel upstream verbatim). The upstream credential then comes
-// from `x-zen-key`, `defaultZenKey`, or the anonymous tier.
+// When auth is on the caller must present a client key — as a bearer token or
+// as `x-api-key` — and that key is NEVER forwarded upstream: it is the proxy's
+// own credential, and forwarding it would hand the secret to the free-tier
+// gateway. The upstream credential then comes from `x-zen-key`,
+// `defaultZenKey`, or the anonymous tier.
 //
-// Without `proxyKey` the caller's own credential is forwarded: bearer first,
-// then `x-api-key`, which is how an Anthropic-native client supplies a real Zen
-// key.
+// With auth off the caller's own credential is forwarded: bearer first, then
+// `x-api-key`, which is how an Anthropic-native client supplies a real Zen key.
 //
-// `x-zen-key` is honoured on every path, with or without a proxy key: the docs
-// promise a per-request Zen key and it used to be read only inside the
-// `proxyKey` branch, so setting it alone silently did nothing.
+// `x-zen-key` is honoured on every path: the docs promise a per-request Zen
+// key and it used to be read only inside one branch, so setting it alone
+// silently did nothing.
 function zenKeyOverride(req) {
   const zen = req.headers["x-zen-key"]
   return typeof zen === "string" && zen.trim() && zen.trim() !== "public" ? `Bearer ${zen.trim()}` : null
@@ -117,9 +115,8 @@ function authForUpstream(req) {
   const key = apiKeyHeader(req)
   const override = zenKeyOverride(req)
 
-  // Multi-key mode: any minted key (or the legacy single proxyKey) is accepted.
-  // A resolved entry is parked on the request so the handler can apply that
-  // key's model allow-list and rate limit without hashing twice.
+  // Any minted key authenticates the call. The dashboard password does not:
+  // it opens /api/* and nothing else.
   const credential = incoming || key
   const resolved = resolveApiKey(credential)
   if (resolved) req._apiKey = resolved

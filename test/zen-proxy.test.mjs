@@ -206,12 +206,12 @@ describe("resolveModel", () => {
 })
 
 describe("authForUpstream", () => {
-  test("anonymous public when no proxyKey and bearer is public", () => {
+  test("anonymous public when no client key and bearer is public", () => {
     const req = mockReq({ headers: { authorization: "Bearer public" } })
     assert.equal(zp.authForUpstream(req), "Bearer public")
   })
 
-  test("BYOK bearer forwarded when no proxyKey", () => {
+  test("BYOK bearer forwarded when no client key", () => {
     const req = mockReq({ headers: { authorization: "Bearer sk-abc" } })
     assert.equal(zp.authForUpstream(req), "Bearer sk-abc")
   })
@@ -222,28 +222,35 @@ describe("authForUpstream", () => {
     assert.equal(zp.authForUpstream(req), "Bearer zen-123")
   })
 
-  test("proxyKey set: wrong bearer rejected", () => {
-    zp.saveConfig({ proxyKey: "admin-1" })
+  test("a minted key set: wrong bearer rejected", () => {
+    const { key } = zp.createApiKey("t")
     const req = mockReq({ headers: { authorization: "Bearer wrong" } })
     assert.equal(zp.authForUpstream(req), null)
+    assert.ok(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${key}` } })), "the minted key passes")
   })
 
-  test("proxyKey set: x-zen-key wins", () => {
-    zp.saveConfig({ proxyKey: "admin-1", defaultZenKey: "zen-default" })
-    const req = mockReq({ headers: { authorization: "Bearer admin-1", "x-zen-key": "zen-custom" } })
+  test("the dashboard password does NOT authenticate model calls", () => {
+    zp.saveConfig({ apiKeys: [], adminPassword: "admin-1", host: "0.0.0.0" })
+    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: "Bearer admin-1" } })), null)
+  })
+
+  test("minted key set: x-zen-key wins", () => {
+    const { key } = zp.createApiKey("t")
+    zp.saveConfig({ defaultZenKey: "zen-default" })
+    const req = mockReq({ headers: { authorization: `Bearer ${key}`, "x-zen-key": "zen-custom" } })
     assert.equal(zp.authForUpstream(req), "Bearer zen-custom")
   })
 
-  test("proxyKey set: defaultZenKey fallback", () => {
-    zp.saveConfig({ proxyKey: "admin-1", defaultZenKey: "zen-default" })
-    const req = mockReq({ headers: { authorization: "Bearer admin-1" } })
+  test("minted key set: defaultZenKey fallback", () => {
+    const { key } = zp.createApiKey("t")
+    zp.saveConfig({ defaultZenKey: "zen-default" })
+    const req = mockReq({ headers: { authorization: `Bearer ${key}` } })
     assert.equal(zp.authForUpstream(req), "Bearer zen-default")
   })
 
-  test("proxyKey set: no zen key uses anonymous public", () => {
-    zp.saveConfig({ proxyKey: "admin-1" })
-    const req = mockReq({ headers: { authorization: "Bearer admin-1" } })
-    assert.equal(zp.authForUpstream(req), "Bearer public")
+  test("minted key set: no zen key uses anonymous public", () => {
+    const { key } = zp.createApiKey("t")
+    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${key}` } })), "Bearer public")
   })
 })
 
@@ -904,13 +911,13 @@ describe("same-model retries (the chosen model is tried first)", () => {
 
 describe("auth visibility & key test", () => {
   test("/api/status reports the effective auth mode", async () => {
-    zp.saveConfig({ defaultZenKey: "", proxyKey: "" })
+    zp.saveConfig({ defaultZenKey: "", adminPassword: "" })
     globalThis.fetch = routeFetch([["/models", jsonResponse({ data: [] })]])
     let res = mockRes()
     await zp.handleStatus(mockReq(), res)
     assert.equal(JSON.parse(res.body).auth.mode, "public")
 
-    zp.saveConfig({ defaultZenKey: "zen-secret-key-123", proxyKey: "" })
+    zp.saveConfig({ defaultZenKey: "zen-secret-key-123", adminPassword: "" })
     globalThis.fetch = routeFetch([["/models", jsonResponse({ data: [] })]])
     res = mockRes()
     await zp.handleStatus(mockReq(), res)
@@ -1345,7 +1352,7 @@ describe("model list self-healing", () => {
 
 describe("restore model list", () => {
   test("POST /api/config re-adds shipped models without touching keys", async () => {
-    zp.saveConfig({ fallbackModels: ["space-bunny-free"], defaultZenKey: "zen-keep-me", proxyKey: "" })
+    zp.saveConfig({ fallbackModels: ["space-bunny-free"], defaultZenKey: "zen-keep-me", adminPassword: "" })
     const res = mockRes()
     await zp.handleApiConfig(
       mockReq({ method: "POST", url: "/api/config", headers: { "content-type": "application/json" }, _body: JSON.stringify({ fallbackModels: true }) }),
@@ -1627,7 +1634,7 @@ describe("handleChat", () => {
   })
 
   test("wrong proxy key → 401", async () => {
-    zp.saveConfig({ proxyKey: "admin-1" })
+    zp.saveConfig({ adminPassword: "admin-1" })
     const req = mockReq({ _body: JSON.stringify({ model: "m", messages: [] }), headers: { authorization: "Bearer nope" } })
     const res = mockRes()
     await zp.handleChat(req, res)
@@ -2193,8 +2200,8 @@ describe("fetchModels", () => {
 })
 
 describe("handleModels", () => {
-  test("requires proxyKey when set", async () => {
-    zp.saveConfig({ proxyKey: "admin-1" })
+  test("requires the admin password when set", async () => {
+    zp.saveConfig({ adminPassword: "admin-1" })
     const req = mockReq({ headers: {} })
     const res = mockRes()
     await zp.handleModels(req, res)
@@ -2202,7 +2209,7 @@ describe("handleModels", () => {
   })
 
   test("serves model list with valid key", async () => {
-    zp.saveConfig({ proxyKey: "admin-1", cacheMs: 0 })
+    zp.saveConfig({ adminPassword: "admin-1", cacheMs: 0 })
     globalThis.fetch = routeFetch([
       ["/models", () => jsonResponse({ data: [{ id: "space-bunny-free" }] })],
     ])
@@ -2220,12 +2227,12 @@ describe("handleModels", () => {
 
 describe("handleApiConfig", () => {
   test("GET returns sanitized config (keys masked)", async () => {
-    zp.saveConfig({ proxyKey: "secret-admin", defaultZenKey: "zen-abcdefghijklmnop" })
+    zp.saveConfig({ adminPassword: "secret-admin", defaultZenKey: "zen-abcdefghijklmnop" })
     const res = mockRes()
     await zp.handleApiConfig(mockReq({ method: "GET", headers: { authorization: "Bearer secret-admin" } }), res)
     const data = JSON.parse(res.body)
-    assert.equal(data.config.proxyKey, "••••••••")
-    assert.ok(!data.config.proxyKey.includes("secret"))
+    assert.equal(data.config.adminPassword, "••••••••")
+    assert.ok(!data.config.adminPassword.includes("secret"))
     assert.ok(data.config.defaultZenKey.includes("••••••"))
   })
 
@@ -2238,20 +2245,20 @@ describe("handleApiConfig", () => {
     assert.equal(zp.config.port, before)
   })
 
-  test("PUT rejects masked proxyKey (keeps existing)", async () => {
-    zp.saveConfig({ proxyKey: "real-key-123" })
+  test("PUT rejects masked adminPassword (keeps existing)", async () => {
+    zp.saveConfig({ adminPassword: "real-key-123" })
     const req = mockReq({
       method: "PUT",
       headers: { authorization: "Bearer real-key-123", "content-type": "application/json" },
-      _body: JSON.stringify({ proxyKey: "••••••••", port: zp.config.port }),
+      _body: JSON.stringify({ adminPassword: "••••••••", port: zp.config.port }),
     })
     const res = mockRes()
     await zp.handleApiConfig(req, res)
-    assert.equal(zp.config.proxyKey, "real-key-123")
+    assert.equal(zp.config.adminPassword, "real-key-123")
   })
 
   test("PUT rejects masked defaultZenKey (keeps existing)", async () => {
-    zp.saveConfig({ proxyKey: "admin-1", defaultZenKey: "zen-real-abcdef" })
+    zp.saveConfig({ adminPassword: "admin-1", defaultZenKey: "zen-real-abcdef" })
     const req = mockReq({
       method: "PUT",
       headers: { authorization: "Bearer admin-1", "content-type": "application/json" },
@@ -2297,7 +2304,7 @@ describe("handleApiConfig", () => {
   test("PUT mid-stream abort: oversized body rejected before stream fully drained", async () => {
     zp.saveConfig({ maxBodyBytes: 1024 * 1024 })
     const chunk = "x".repeat(100 * 1024)
-    const chunks = Array.from({ length: 20 }, () => chunk) // ~2MB, no proxyKey set so adminAuth passes
+    const chunks = Array.from({ length: 20 }, () => chunk) // ~2MB, no admin password set so adminAuth passes on loopback
     const req = mockStreamingReq(chunks, { method: "PUT", headers: { "content-type": "application/json" } })
     const res = mockRes()
     await zp.handleApiConfig(req, res)
@@ -2317,9 +2324,9 @@ describe("sanitize / maskKey", () => {
     assert.ok(long.includes("••••••"))
   })
 
-  test("sanitize masks proxyKey and defaultZenKey", () => {
-    const out = zp.sanitize({ proxyKey: "pk-1", defaultZenKey: "zen-2" })
-    assert.equal(out.proxyKey, "••••••••")
+  test("sanitize masks adminPassword and defaultZenKey", () => {
+    const out = zp.sanitize({ adminPassword: "pk-1", defaultZenKey: "zen-2" })
+    assert.equal(out.adminPassword, "••••••••")
     assert.equal(out.defaultZenKey, "••••••••")
   })
 })
@@ -2357,13 +2364,13 @@ describe("/api/keys (hashed keys admin API)", () => {
   }
 
   test("requires a credential when one is configured", async () => {
-    zp.saveConfig({ proxyKey: "secret-admin" })
+    zp.saveConfig({ adminPassword: "secret-admin" })
     const res = await keyResp("GET", { headers: {} })
     assert.equal(res.state.status, 401)
   })
 
   test("mints a key; plaintext shown once; never in config or listing", async () => {
-    zp.saveConfig({ proxyKey: "secret-admin" })
+    zp.saveConfig({ adminPassword: "secret-admin" })
     const res = await keyResp("POST", { headers: { authorization: "Bearer secret-admin" }, body: { name: "laptop" } })
     assert.equal(res.state.status, 201)
     const { key, id } = JSON.parse(res.body)
@@ -2376,7 +2383,7 @@ describe("/api/keys (hashed keys admin API)", () => {
   })
 
   test("config PUT cannot clobber apiKeys through the dashboard", async () => {
-    zp.saveConfig({ proxyKey: "secret-admin" })
+    zp.saveConfig({ adminPassword: "secret-admin" })
     zp.createApiKey("before")
     const before = zp.config.apiKeys.length
     const res = mockRes()
@@ -2393,7 +2400,7 @@ describe("/api/keys (hashed keys admin API)", () => {
   })
 
   test("revocation: DELETE /api/keys?id= stops the key at once", async () => {
-    zp.saveConfig({ proxyKey: "secret-admin" })
+    zp.saveConfig({ adminPassword: "secret-admin" })
     const { key, entry } = zp.createApiKey("gone")
     const res = await keyResp("DELETE", { url: `/api/keys?id=${entry.id}`, headers: { authorization: "Bearer secret-admin" } })
     assert.equal(res.state.status, 200)
@@ -2405,15 +2412,15 @@ describe("/api/keys (hashed keys admin API)", () => {
 
 describe("bootstrap key for public binds (9router parity)", () => {
   test("loopback with no credentials stays open — nothing minted", () => {
-    zp.saveConfig({ proxyKey: "", apiKeys: [], host: "127.0.0.1" })
+    zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1" })
     assert.equal(zp.ensureDefaultKey(), null)
   })
 
   test("public bind with no credentials mints one and auth turns on", () => {
-    zp.saveConfig({ proxyKey: "", apiKeys: [], host: "0.0.0.0" })
+    zp.saveConfig({ adminPassword: "", apiKeys: [], host: "0.0.0.0" })
     const minted = zp.ensureDefaultKey()
     assert.match(minted.key, zp.KEY_RE)
-    assert.equal(zp.config.proxyKey, "", "the bootstrap key is an API key, not the dashboard proxyKey")
+    assert.equal(zp.config.adminPassword.length > 0, true, "a dashboard password was minted too")
     assert.equal(zp.config.apiKeys.length, 1, "stored hashed in the keys list")
     assert.equal(zp.config.apiKeys[0].name, "Default Key")
     assert.ok(zp.resolveApiKey(minted.key), "it authenticates model calls")
@@ -2477,7 +2484,7 @@ describe("router / health", () => {
   })
 
   test("/api/reset clears stats but keeps the Zen key", async () => {
-    zp.saveConfig({ proxyKey: "admin-1", defaultZenKey: "zen-keep-me" })
+    zp.saveConfig({ adminPassword: "admin-1", defaultZenKey: "zen-keep-me" })
     zp.requestStats.total = 42
     const res = mockRes()
     await zp.router(
@@ -2487,7 +2494,7 @@ describe("router / health", () => {
     assert.equal(res.state.status, 200)
     assert.equal(zp.requestStats.total, 0, "reset clears request stats")
     assert.equal(zp.config.defaultZenKey, "zen-keep-me", "reset must not clear the Zen key")
-    assert.equal(zp.config.proxyKey, "admin-1", "reset must not clear proxyKey")
+    assert.equal(zp.config.adminPassword, "admin-1", "reset must not clear the admin password")
   })
 })
 
@@ -5098,7 +5105,7 @@ describe("manifest calls the caller cannot run are dropped from replies (issue #
 
 // ---- audit 2026-10-27: critical fixes -------------------------------------
 
-describe("proxyKey is the proxy's secret, not a Zen credential (audit #1/#2)", () => {
+describe("client keys gate inference; the admin password only gates the UI", () => {
   const anthro = (headers = {}) =>
     mockReq({
       method: "POST",
@@ -5114,29 +5121,31 @@ describe("proxyKey is the proxy's secret, not a Zen credential (audit #1/#2)", (
       _body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
     })
 
+  let apiKey
   beforeEach(() => {
-    zp.saveConfig({ proxyKey: "proxy-secret", defaultZenKey: "zen-good-key", fallbackModels: ["m"], defaultModel: "m", responsesModels: [] })
+    zp.saveConfig({ apiKeys: [], adminPassword: "admin-secret", defaultZenKey: "zen-good-key", fallbackModels: ["m"], defaultModel: "m", responsesModels: [], host: "127.0.0.1" })
+    apiKey = zp.createApiKey("client").key
     globalThis.fetch = async () =>
       jsonResponse({ id: "x", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] })
   })
 
-  test("an arbitrary x-api-key cannot bypass proxyKey", async () => {
+  test("an arbitrary x-api-key cannot bypass the key gate", async () => {
     const res = mockRes()
     await zp.handleMessages(anthro({ "x-api-key": "attacker-chosen-value" }), res)
-    assert.equal(res.state.status, 401, "a token the proxy key does not match must be refused")
+    assert.equal(res.state.status, 401, "an unknown client key must be refused")
   })
 
-  test("the proxy key presented as x-api-key is accepted but never forwarded upstream", async () => {
+  test("the client key is accepted but never forwarded upstream", async () => {
     let seenAuth = null
     globalThis.fetch = async (u, opts) => {
       seenAuth = opts.headers.authorization
       return jsonResponse({ id: "x", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] })
     }
     const res = mockRes()
-    await zp.handleMessages(anthro({ "x-api-key": "proxy-secret" }), res)
+    await zp.handleMessages(anthro({ "x-api-key": apiKey }), res)
     assert.equal(res.state.status, 200)
-    assert.equal(seenAuth, "Bearer zen-good-key", "the configured Zen key is used, not the proxy key")
-    assert.ok(!String(seenAuth).includes("proxy-secret"), "the proxy secret never leaves the machine")
+    assert.equal(seenAuth, "Bearer zen-good-key", "the configured Zen key is used, not the client key")
+    assert.ok(!String(seenAuth).includes(apiKey), "the client key never leaves the machine")
   })
 
   test("the same bypass is closed on the OpenAI-shaped route", async () => {
@@ -5145,13 +5154,17 @@ describe("proxyKey is the proxy's secret, not a Zen credential (audit #1/#2)", (
     assert.equal(res.state.status, 401)
   })
 
+  test("the admin password does not authenticate model calls", async () => {
+    const res = mockRes()
+    await zp.handleMessages(anthro({ "x-api-key": "admin-secret" }), res)
+    assert.equal(res.state.status, 401, "a dashboard login is not an inference credential")
+  })
+
   test("a minted sk- key authenticates on both routes, a forged one does not", () => {
-    const { key } = zp.createApiKey("t")
-    assert.match(key, zp.KEY_RE)
-    assert.ok(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${key}` } })), "real key accepted")
+    assert.match(apiKey, zp.KEY_RE)
+    assert.ok(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${apiKey}` } })), "real key accepted")
     assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer sk-${"A".repeat(43)}` } })), null)
-    assert.ok(zp.resolveApiKey(key), "the presented key resolves to its entry")
-    assert.equal(zp.resolveApiKey(key).legacy, undefined, "a minted key is not the legacy proxyKey")
+    assert.ok(zp.resolveApiKey(apiKey), "the presented key resolves to its entry")
   })
 
   test("minted keys hash-only: plaintext never lands in the config", () => {
@@ -5164,22 +5177,32 @@ describe("proxyKey is the proxy's secret, not a Zen credential (audit #1/#2)", (
   })
 
   test("listApiKeys exposes no hashes", () => {
-    const { key, entry } = zp.createApiKey("hidden")
+    const { entry } = zp.createApiKey("hidden")
     assert.ok(!JSON.stringify(zp.listApiKeys()).includes(entry.hash))
     zp.revokeApiKey(entry.id)
     assert.deepEqual(zp.listApiKeys().find((k) => k.id === entry.id), undefined)
   })
 
-  test("x-api-key still works as a real Zen key when no proxyKey is set", () => {
-    zp.saveConfig({ proxyKey: "", defaultZenKey: "" })
+  test("x-api-key still works as a real Zen key when no key is required", () => {
+    zp.saveConfig({ apiKeys: [], adminPassword: "", defaultZenKey: "", host: "127.0.0.1" })
     assert.equal(zp.authForUpstream(mockReq({ headers: { "x-api-key": "my-zen-key" } })), "Bearer my-zen-key")
   })
 
-  test("adminAuth compares in constant time and accepts either header", () => {
-    zp.saveConfig({ proxyKey: "admin-1", defaultZenKey: "" })
-    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: "Bearer admin-1" } })), "Bearer public")
-    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: "Bearer admin-2" } })), null)
-    assert.equal(zp.authForUpstream(mockReq({ headers: { "x-api-key": "admin-1" } })), "Bearer public")
+  test("adminAuth accepts the admin password as either header, and nothing else", async () => {
+    zp.saveConfig({ adminPassword: "admin-1", defaultZenKey: "" })
+    const ok = mockRes()
+    await zp.handleStatus(mockReq({ method: "GET", url: "/api/status", headers: { authorization: "Bearer admin-1" } }), ok)
+    assert.equal(ok.state.status, 200, "the password opens the dashboard")
+    const ok2 = mockRes()
+    await zp.handleStatus(mockReq({ method: "GET", url: "/api/status", headers: { "x-api-key": "admin-1" } }), ok2)
+    assert.equal(ok2.state.status, 200)
+    const bad = mockRes()
+    await zp.handleStatus(mockReq({ method: "GET", url: "/api/status", headers: { authorization: "Bearer admin-2" } }), bad)
+    assert.equal(bad.state.status, 401)
+    const clientKey = zp.createApiKey("client-only").key
+    const keyed = mockRes()
+    await zp.handleStatus(mockReq({ method: "GET", url: "/api/status", headers: { authorization: `Bearer ${clientKey}` } }), keyed)
+    assert.equal(keyed.state.status, 401, "a client API key must NOT log into the dashboard")
   })
 })
 
@@ -5518,8 +5541,8 @@ describe("provider-qualified model ids (audit #21)", () => {
 })
 
 describe("admin and helper routes (audit #28/#31/#32)", () => {
-  test("count_tokens is refused without the proxy key", async () => {
-    zp.saveConfig({ proxyKey: "admin-1" })
+  test("count_tokens is refused without a client key", async () => {
+    zp.saveConfig({ adminPassword: "admin-1", apiKeys: [], requireApiKey: true, host: "127.0.0.1" })
     const res = mockRes()
     await zp.router(
       mockReq({ method: "POST", url: "/v1/messages/count_tokens", headers: { "content-type": "application/json" }, _body: JSON.stringify({ messages: [] }) }),
@@ -5528,14 +5551,15 @@ describe("admin and helper routes (audit #28/#31/#32)", () => {
     assert.equal(res.state.status, 401)
   })
 
-  test("count_tokens still answers with the proxy key", async () => {
-    zp.saveConfig({ proxyKey: "admin-1" })
+  test("count_tokens still answers with a client key", async () => {
+    zp.saveConfig({ adminPassword: "admin-1" })
+    const clientKey = zp.createApiKey("ct").key
     const res = mockRes()
     await zp.router(
       mockReq({
         method: "POST",
         url: "/v1/messages/count_tokens",
-        headers: { "content-type": "application/json", authorization: "Bearer admin-1" },
+        headers: { "content-type": "application/json", authorization: `Bearer ${clientKey}` },
         _body: JSON.stringify({ messages: [{ role: "user", content: "hello world" }] }),
       }),
       res,
@@ -5706,20 +5730,20 @@ describe("CRLF streams survive every chunk boundary (audit #8)", () => {
   })
 })
 
-describe("x-zen-key works without a proxy key (audit #9)", () => {
+describe("x-zen-key works without a client key (audit #9)", () => {
   test("a per-request Zen key is honoured on an open proxy", () => {
-    zp.saveConfig({ proxyKey: "", defaultZenKey: "" })
+    zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1", defaultZenKey: "" })
     assert.equal(zp.authForUpstream(mockReq({ headers: { "x-zen-key": "sk-custom" } })), "Bearer sk-custom")
   })
 
   test("a per-request Zen key outranks a configured default", () => {
-    zp.saveConfig({ proxyKey: "", defaultZenKey: "zen-default" })
+    zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1", defaultZenKey: "zen-default" })
     assert.equal(zp.authForUpstream(mockReq({ headers: { "x-zen-key": "sk-custom" } })), "Bearer sk-custom")
     assert.equal(zp.authForUpstream(mockReq()), "Bearer zen-default")
   })
 
   test("`public` is anonymous, not an override", () => {
-    zp.saveConfig({ proxyKey: "", defaultZenKey: "" })
+    zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1", defaultZenKey: "" })
     assert.equal(zp.authForUpstream(mockReq({ headers: { "x-zen-key": "public" } })), "Bearer public")
   })
 })
@@ -5727,7 +5751,9 @@ describe("x-zen-key works without a proxy key (audit #9)", () => {
 describe("the chat route retries a rejected placeholder key (audit #10)", () => {
   test("a 401 for the caller's placeholder key falls back to the configured Zen key", async () => {
     zp.saveConfig({
-      proxyKey: "",
+      adminPassword: "",
+      apiKeys: [],
+      host: "127.0.0.1",
       defaultZenKey: "zen-configured",
       fallbackModels: ["big-pickle"],
       defaultModel: "",
@@ -5758,8 +5784,9 @@ describe("the chat route retries a rejected placeholder key (audit #10)", () => 
     assert.deepEqual(auths, ["Bearer sk-placeholder", "Bearer zen-configured"], "one retry under the configured key")
   })
 
-  test("a proxy key is never swapped for the fallback (it would leak)", async () => {
-    zp.saveConfig({ proxyKey: "proxy-secret", defaultZenKey: "zen-configured", fallbackModels: ["big-pickle"], defaultModel: "", retriesPerModel: 0 })
+  test("a client key is never swapped for the fallback (it would leak)", async () => {
+    const { key: proxySecret } = zp.createApiKey("leak-check")
+    zp.saveConfig({ defaultZenKey: "zen-configured", fallbackModels: ["big-pickle"], defaultModel: "", retriesPerModel: 0 })
     const auths = []
     globalThis.fetch = routeFetch([
       [
@@ -5770,16 +5797,16 @@ describe("the chat route retries a rejected placeholder key (audit #10)", () => 
         },
       ],
     ])
-    // With a proxy key configured the handler authenticates first, then uses the
-    // configured Zen key for upstream — the proxy key itself is never forwarded.
+    // With a client key configured the handler authenticates first, then uses
+    // the configured Zen key upstream — the client key is never forwarded.
     const req = mockReq({
-      headers: { authorization: "Bearer proxy-secret" },
+      headers: { authorization: `Bearer ${proxySecret}` },
       _body: JSON.stringify({ model: "big-pickle", messages: [] }),
     })
     const res = mockRes()
     await zp.handleChat(req, res)
     assert.equal(res.state.status, 401)
-    assert.ok(!auths.some((a) => a === "Bearer proxy-secret"), `proxy key leaked upstream: ${JSON.stringify(auths)}`)
+    assert.ok(!auths.some((a) => a === `Bearer ${proxySecret}`), `client key leaked upstream: ${JSON.stringify(auths)}`)
   })
 })
 

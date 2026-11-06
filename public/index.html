@@ -341,7 +341,7 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
   <div class="box">
     <img src="/assets/logo-128.png" alt="zen-proxy logo" style="width:56px;height:56px;border-radius:14px;border:2px solid var(--acid);box-shadow:3px 3px 0 var(--coral);margin-bottom:16px;object-fit:cover">
     <h2>Locked 🔒</h2>
-    <p>This dashboard is protected. Enter the admin key (<code>proxyKey</code> or any client <code>sk-…</code> key) to get in.</p>
+    <p>This dashboard is protected. Enter the admin password (<code>adminPassword</code> / <code>ADMIN_PASSWORD</code>).</p>
     <input type="password" id="authKey" placeholder="admin key" autocomplete="off">
     <div class="row" style="margin-top:20px">
       <button class="primary grow" onclick="submitAuth()">Unlock</button>
@@ -420,7 +420,7 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
         </div>
         <div>
           <label>Default model <span class="hint">(empty = auto-pick healthy free model)</span></label><input id="cfgDefault" type="text">
-          <label>Proxy key (empty = open)</label><input id="cfgProxyKey" type="password" autocomplete="new-password">
+          <label>Admin password (dashboard login; empty = open on loopback)</label><input id="cfgAdminPassword" type="password" autocomplete="new-password">
           <label>Zen key (byok, optional)</label><input id="cfgZenKey" type="password" autocomplete="new-password">
           <div class="row" style="gap:8px;margin-top:2px">
             <button type="button" class="primary" onclick="testZenKey()" style="font-size:11px;padding:6px 10px">Test key</button>
@@ -432,7 +432,7 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
       </div>
       <div class="innerpanel">
         <h2><span class="hh">Client keys</span><span class="sticker acid" style="transform:none">shown once</span></h2>
-        <p class="hint" style="margin-bottom:16px">Keys callers authenticate with (<code>Authorization: Bearer sk-…</code> or <code>x-api-key</code>). Stored hashed — a minted key cannot be read back, only replaced. When auth is on, the proxy key and these keys also unlock this dashboard and the admin API.</p>
+        <p class="hint" style="margin-bottom:16px">Keys your agents use to call models (<code>Authorization: Bearer sk-…</code> or <code>x-api-key</code>). Stored hashed — shown once at mint, then never again. These are <b>not</b> a dashboard login: the admin password above is what opens this UI.</p>
         <div class="row" style="margin:0 0 16px;gap:12px">
           <input class="grow" id="newKeyName" placeholder="name it, e.g. laptop or ci-runner" onkeydown="if(event.key==='Enter')mintKey()">
           <button class="primary" onclick="mintKey()">+ Mint key</button>
@@ -784,7 +784,7 @@ async function populateConfigForm() {
   $("cfgUa").value = config.ua
   $("cfgDefault").value = config.defaultModel
   $("cfgDefault").placeholder = "(auto)"
-  $("cfgProxyKey").value = config.proxyKey === "••••••••" ? "" : config.proxyKey
+  $("cfgAdminPassword").value = config.adminPassword === "••••••••" ? "" : config.adminPassword
   $("cfgZenKey").value = savedZenKeyMasked
   $("cfgTimeout").value = config.timeoutMs
   $("cfgFallback").value = JSON.stringify(config.fallbackModels, null, 2)
@@ -823,7 +823,7 @@ async function saveConfig() {
     upstream: $("cfgUpstream").value.trim(),
     ua: $("cfgUa").value.trim(),
     defaultModel: $("cfgDefault").value.trim(),
-    proxyKey: $("cfgProxyKey").value,
+    adminPassword: $("cfgAdminPassword").value,
     timeoutMs: Number($("cfgTimeout").value || 120000),
     fallbackModels: JSON.parse($("cfgFallback").value || "[]"),
     modelAliases: JSON.parse($("cfgAliases").value || "{}"),

@@ -1,11 +1,10 @@
 // The proxy's own credential, for a self-host on a public address.
 //
-// `proxyKey` on its own is a single shared secret: fine on localhost, but a
-// public VPS with nothing configured is an open relay, and a hand-typed
-// `proxyKey` is guessable (a 429 every try, but still). This mints a key from
-// the CSPRNG, stores only its SHA-256, and lets the operator revoke it. Still
-// one user — several keys exist so a leaked one can be dropped without
-// rotating the rest.
+// The dashboard password (`adminPassword`) is not a client credential: it opens
+// the UI and nothing else. Model calls authenticate with one of these keys —
+// the same split 9router, OpenRouter and Zen itself use. A key is minted from
+// the CSPRNG, stored only as its SHA-256, and revocable; several exist so a
+// leaked one can be dropped without rotating the rest.
 //
 // Format: `sk-` + 43 base64url chars (256 bits). Deliberately NOT the 9router
 // scheme (`sk-{machineId}-{keyId}-{hmac8}`): its keyId comes from
@@ -24,12 +23,6 @@ const KEY_RE = /^sk-[A-Za-z0-9_-]{43}$/
 
 function hashKey(key) {
   return createHash("sha256").update(String(key)).digest("hex")
-}
-
-function safeEqualStr(a, b) {
-  const ha = createHash("sha256").update(String(a ?? "")).digest()
-  const hb = createHash("sha256").update(String(b ?? "")).digest()
-  return timingSafeEqual(ha, hb)
 }
 
 /**
@@ -63,17 +56,15 @@ export function listApiKeys() {
 }
 
 /**
- * Resolve a presented key to its entry, or null. Constant-time over the hash,
- * so a wrong key cannot be found by timing.
+ * Resolve a presented client key to its entry, or null. Constant-time over the
+ * hash, so a wrong key cannot be found by timing.
  *
- * A plaintext `proxyKey` also resolves, so an existing install keeps working.
+ * Only minted keys resolve: the dashboard password is NOT a client credential
+ * and never authenticates a model call.
  */
 export function resolveApiKey(presented) {
   const raw = String(presented ?? "").trim()
   if (!raw) return null
-  if (config.proxyKey && safeEqualStr(raw, config.proxyKey)) {
-    return { id: "proxyKey", name: "proxyKey", legacy: true }
-  }
   if (!KEY_RE.test(raw)) return null
   const digest = Buffer.from(hashKey(raw), "hex")
   for (const entry of config.apiKeys) {
@@ -95,12 +86,12 @@ export function resolveApiKey(presented) {
 }
 
 /**
- * Is auth required? Yes when any credential exists, when REQUIRE_API_KEY=1, or
- * when bound to a non-loopback address. Publishing an unauthenticated proxy to
- * a network is never the intent.
+ * Do MODEL CALLS need a client key? Yes when any key exists, when
+ * REQUIRE_API_KEY=1, or when bound to a non-loopback address. The dashboard
+ * password plays no part here — it is a login, not an inference credential.
  */
 export function authRequired() {
-  if (config.proxyKey || config.apiKeys.length) return true
+  if (config.apiKeys.length) return true
   if (config.requireApiKey) return true
   // Behind a reverse proxy the bind address is still loopback, so this cannot
   // be the only signal — REQUIRE_API_KEY covers that deploy.
@@ -109,25 +100,42 @@ export function authRequired() {
 }
 
 /**
- * Mint the first credential for an install that has none, the way 9router
+ * Does the DASHBOARD need a password? Same exposure rules as model calls, but
+ * keyed on `adminPassword` instead of `apiKeys` — a client key existing must not
+ * lock the UI, and a password existing must not gate inference.
+ */
+export function dashboardAuthRequired() {
+  if (config.adminPassword) return true
+  if (config.requireApiKey) return true
+  const host = String(config.host ?? "").trim().toLowerCase()
+  return !(host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]")
+}
+
+/**
+ * Provision the credentials a first-time public install needs, the way 9router
  * auto-provisions a "Default Key" so the endpoint works out of the box.
  *
- * Minted into the hashed `apiKeys` list — the key factory for model calls,
- * exactly what it looks like. It does NOT go into `proxyKey`, which is the
- * dashboard/admin credential (9router's separation: api-key table gates
- * /v1/*, a hashed password gates the UI). It still unlocks the dashboard too,
- * because on a single-user install whoever holds a valid key is the operator;
- * the credential just is not *called* proxyKey, and cannot be, since a hash
- * cannot be read back into that field.
- *
- * Only fires when auth is actually required — a loopback install with no
- * credentials keeps the anonymous tier it has always had.
+ * Two DIFFERENT secrets, because they answer two different questions:
+ *   - `adminPassword` opens the dashboard and `/api/*` (9router's role: a
+ *     separate password + session, not an API key).
+ *   - a minted `sk-…` in the hashed `apiKeys` list calls models (9router's
+ *     `apiKeys` table gating `/v1/*`).
+ * Neither authenticates the other's job. Returns whichever were created, or
+ * null when auth is off / credentials already exist.
  */
 export function ensureDefaultKey() {
   if (!authRequired()) return null
-  if (config.proxyKey || config.apiKeys.length) return null
-  const { key, entry } = createApiKey("Default Key")
-  return { key, entry }
+  const out = {}
+  if (!config.adminPassword) {
+    out.adminPassword = KEY_PREFIX + randomBytes(KEY_BYTES).toString("base64url")
+    saveConfig({ adminPassword: out.adminPassword })
+  }
+  if (!config.apiKeys.length) {
+    const { key, entry } = createApiKey("Default Key")
+    out.key = key
+    out.entry = entry
+  }
+  return Object.keys(out).length ? out : null
 }
 
 export { hashKey, KEY_RE, KEY_PREFIX }

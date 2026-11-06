@@ -105,15 +105,15 @@ server.listen(config.port, config.host, () => {
   // at boot and print it once — the config file still holds it, but the log is
   // where the operator looks first.
   // A public bind with no credential would be an open relay (and the anonymous
-  // `public` tier is the only thing a stranger would need to drain it). Mint one
-  // at boot and print it once — the config file holds only the hash, so the log
-  // is the one place the plaintext ever appears.
+  // `public` tier is the only thing a stranger would need to drain it). Mint
+  // both secrets at boot and print them once — each is stored once, the
+  // password in the 0600 config file, the key only as a hash.
   const minted = ensureDefaultKey()
   if (minted) {
-    log("no api key configured and this proxy is reachable off this machine")
-    log("   generated a default client API key — use it as ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY:")
-    log(`   ${minted.key}`)
-    log("   (also unlocks the dashboard; manage keys in Settings → Client keys)")
+    log("no credentials configured and this proxy is reachable off this machine")
+    if (minted.adminPassword) log(`   dashboard password: ${minted.adminPassword}   (Settings → change it; this is the login only)`)
+    if (minted.key) log(`   client api key:     ${minted.key}   (ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY for model calls)`)
+    log("   they are separate: the password never calls models, the key never logs in")
   }
 
   startConfigWatch()

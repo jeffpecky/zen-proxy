@@ -57,7 +57,7 @@ async function handleMessages(req, res) {
   // ANTHROPIC_AUTH_TOKEN holds, which for a local proxy is usually a placeholder).
   // If upstream rejects it, fall back to the configured key or the anonymous tier
   // rather than failing the request outright.
-  const fallbackAuth = config.proxyKey ? null : config.defaultZenKey ? `Bearer ${config.defaultZenKey}` : "Bearer public"
+  const fallbackAuth = config.apiKeys.length || config.adminPassword ? null : config.defaultZenKey ? `Bearer ${config.defaultZenKey}` : "Bearer public"
   let triedFallback = false
   let triedByok = false
   let rotated429 = false
@@ -293,8 +293,8 @@ async function handleChat(req, res, responsesRoute = false) {
   // Mirrors handleMessages: OpenAI-shaped clients usually send a placeholder
   // key (OPENAI_API_KEY=sk-local, or whatever the SDK defaults to), and a
   // configured proxy must not fail just because upstream rejects that string.
-  // Only applied when no proxyKey is required, so the proxy key can never leak.
-  const fallbackAuth = config.proxyKey ? null : config.defaultZenKey ? `Bearer ${config.defaultZenKey}` : "Bearer public"
+  // Only applied when no client key is required, so a proxy credential can never leak.
+  const fallbackAuth = config.apiKeys.length || config.adminPassword ? null : config.defaultZenKey ? `Bearer ${config.defaultZenKey}` : "Bearer public"
   let triedFallback = false
   let triedByok = false
   let rotated429 = false

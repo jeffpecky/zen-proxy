@@ -69,7 +69,9 @@ const DEFAULT_CONFIG = {
   retryBackoffMs: envNum("RETRY_BACKOFF_MS", 500),
   rateLimitMax: envNum("RATE_LIMIT_MAX", 0),
   rateLimitWindowMs: envNum("RATE_LIMIT_WINDOW_MS", 60_000),
-  proxyKey: ENV.PROXY_KEY ?? "",
+  // Dashboard login. NOT a client credential: `sk-…` keys in `apiKeys` are
+  // for model calls only (see src/apikeys.mjs).
+  adminPassword: ENV.ADMIN_PASSWORD ?? ENV.PROXY_KEY ?? "",
   // Minted per-caller keys (see src/apikeys.mjs). Only the SHA-256 of each key
   // is stored, so a leaked config file carries no usable credential.
   apiKeys: [],
@@ -231,7 +233,7 @@ function maskKey(k) {
 
 function sanitize(cfg) {
   const out = { ...cfg }
-  if (out.proxyKey) out.proxyKey = "••••••••"
+  if (out.adminPassword) out.adminPassword = "••••••••"
   if (out.defaultZenKey) out.defaultZenKey = maskKey(out.defaultZenKey)
   // The hashes are internal: returning them lets a leaked dashboard response be
   // attacked offline, and nothing in the UI needs them. Ids and names suffice.
