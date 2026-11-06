@@ -112,11 +112,13 @@ export function authRequired() {
  * Mint the first credential for an install that has none, the way 9router
  * auto-provisions a "Default Key" so the endpoint works out of the box.
  *
- * Stored as `proxyKey` rather than in the hashed list on purpose: it is the one
- * key the operator must be able to read back (from the config file or the
- * dashboard) after the log scrolls away, and a hash cannot be shown again. The
- * file is 0600, and `apiKeys` remains the place for keys that are only ever
- * presented, never displayed.
+ * Minted into the hashed `apiKeys` list — the key factory for model calls,
+ * exactly what it looks like. It does NOT go into `proxyKey`, which is the
+ * dashboard/admin credential (9router's separation: api-key table gates
+ * /v1/*, a hashed password gates the UI). It still unlocks the dashboard too,
+ * because on a single-user install whoever holds a valid key is the operator;
+ * the credential just is not *called* proxyKey, and cannot be, since a hash
+ * cannot be read back into that field.
  *
  * Only fires when auth is actually required — a loopback install with no
  * credentials keeps the anonymous tier it has always had.
@@ -124,9 +126,8 @@ export function authRequired() {
 export function ensureDefaultKey() {
   if (!authRequired()) return null
   if (config.proxyKey || config.apiKeys.length) return null
-  const key = KEY_PREFIX + randomBytes(KEY_BYTES).toString("base64url")
-  saveConfig({ proxyKey: key })
-  return key
+  const { key, entry } = createApiKey("Default Key")
+  return { key, entry }
 }
 
 export { hashKey, KEY_RE, KEY_PREFIX }

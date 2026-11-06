@@ -104,12 +104,16 @@ server.listen(config.port, config.host, () => {
   // `public` tier is the only thing a stranger would need to drain it). Mint one
   // at boot and print it once — the config file still holds it, but the log is
   // where the operator looks first.
+  // A public bind with no credential would be an open relay (and the anonymous
+  // `public` tier is the only thing a stranger would need to drain it). Mint one
+  // at boot and print it once — the config file holds only the hash, so the log
+  // is the one place the plaintext ever appears.
   const minted = ensureDefaultKey()
   if (minted) {
-    log("no credential configured and this proxy is reachable off this machine")
-    log(`   generated a default proxy key — set it as ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY:`)
-    log(`   ${minted}`)
-    log(`   (stored in ${CONFIG_PATH}; revoke from the dashboard or delete it there)`)
+    log("no api key configured and this proxy is reachable off this machine")
+    log("   generated a default client API key — use it as ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY:")
+    log(`   ${minted.key}`)
+    log("   (also unlocks the dashboard; manage keys in Settings → Client keys)")
   }
 
   startConfigWatch()

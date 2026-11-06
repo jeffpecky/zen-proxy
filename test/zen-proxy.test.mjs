@@ -2412,11 +2412,14 @@ describe("bootstrap key for public binds (9router parity)", () => {
   test("public bind with no credentials mints one and auth turns on", () => {
     zp.saveConfig({ proxyKey: "", apiKeys: [], host: "0.0.0.0" })
     const minted = zp.ensureDefaultKey()
-    assert.match(minted, zp.KEY_RE)
-    assert.equal(zp.config.proxyKey, minted, "persisted for later read-back from the config file")
+    assert.match(minted.key, zp.KEY_RE)
+    assert.equal(zp.config.proxyKey, "", "the bootstrap key is an API key, not the dashboard proxyKey")
+    assert.equal(zp.config.apiKeys.length, 1, "stored hashed in the keys list")
+    assert.equal(zp.config.apiKeys[0].name, "Default Key")
+    assert.ok(zp.resolveApiKey(minted.key), "it authenticates model calls")
     assert.equal(zp.authRequired(), true)
     assert.equal(zp.authForUpstream(mockReq({})), null, "anonymous requests refused")
-    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${minted}` } })), "Bearer public")
+    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${minted.key}` } })), "Bearer public")
   })
 
   test("never mints twice", () => {
