@@ -2378,17 +2378,21 @@ describe("/api/keys (hashed keys admin API)", () => {
     assert.equal(res.state.status, 401)
   })
 
-  test("mints a key; plaintext shown once; never in config or listing", async () => {
+  test("mints a key; it is listed (for copy) and authenticated by hash", async () => {
     zp.saveConfig({ adminPassword: "secret-admin" })
     const res = await keyResp("POST", { headers: { authorization: "Bearer secret-admin" }, body: { name: "laptop" } })
     assert.equal(res.state.status, 201)
     const { key, id } = JSON.parse(res.body)
     assert.match(key, zp.KEY_RE)
-    const onDisk = fs.readFileSync(process.env.ZEN_PROXY_CONFIG, "utf8")
-    assert.ok(!onDisk.includes(key), "config holds only the hash")
     const list = await keyResp("GET", { headers: { authorization: "Bearer secret-admin" } })
-    assert.ok(!list.body.includes(key), "listing does not leak the plaintext")
-    assert.equal(JSON.parse(list.body).keys.some((k) => k.id === id), true)
+    const listed = JSON.parse(list.body).keys.find((k) => k.id === id)
+    assert.equal(listed.key, key, "the dashboard shows the key so it can be copied")
+    assert.equal(listed.hash, undefined, "the hash is never exposed")
+    // Auth is still against the hash, whatever a corrupted plaintext says.
+    const onDisk = JSON.parse(fs.readFileSync(process.env.ZEN_PROXY_CONFIG, "utf8"))
+    const entry = onDisk.apiKeys.find((k) => k.id === id)
+    assert.ok(entry.hash && !entry.hash.startsWith("sk-"), "the stored hash is not the key")
+    assert.ok(zp.resolveApiKey(key), "the presented key resolves")
   })
 
   test("config PUT cannot clobber apiKeys through the dashboard", async () => {
@@ -5190,11 +5194,15 @@ describe("client keys gate inference; the admin password only gates the UI", () 
     assert.ok(zp.resolveApiKey(apiKey), "the presented key resolves to its entry")
   })
 
-  test("minted keys hash-only: plaintext never lands in the config", () => {
-    const { key, entry } = zp.createApiKey("leak-test")
-    const onDisk = fs.readFileSync(process.env.ZEN_PROXY_CONFIG, "utf8")
-    assert.ok(!onDisk.includes(key), "the plaintext key is not in the config file")
-    assert.ok(onDisk.includes(entry.hash.slice(0, 16)), "its hash is")
+  test("authentication uses the hash, not the stored plaintext", () => {
+    const { key, entry } = zp.createApiKey("hash-test")
+    const onDisk = JSON.parse(fs.readFileSync(process.env.ZEN_PROXY_CONFIG, "utf8"))
+    const stored = onDisk.apiKeys.find((k) => k.id === entry.id)
+    assert.equal(stored.hash, entry.hash, "the hash is persisted")
+    // Tampering with the displayed plaintext does not make it authenticate.
+    zp.saveConfig({ apiKeys: [{ ...stored, key: "sk-" + "B".repeat(43) }] })
+    assert.equal(zp.resolveApiKey("sk-" + "B".repeat(43)), null, "a forged plaintext is refused")
+    assert.ok(zp.resolveApiKey(key), "the real key still works")
     zp.revokeApiKey(entry.id)
     assert.equal(zp.resolveApiKey(key), null, "revocation is immediate")
   })

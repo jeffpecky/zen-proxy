@@ -34,6 +34,10 @@ export function createApiKey(name = "") {
   const entry = {
     id: randomBytes(6).toString("hex"),
     name: String(name || "").slice(0, 80),
+    // The plaintext is kept so the dashboard can show and copy it, the way
+    // OpenRouter/Zen show a key. Only for display: authentication still uses
+    // `hash` below, so a config file that leaks still needs the key itself.
+    key,
     hash: hashKey(key),
     createdAt: new Date().toISOString(),
     lastUsedAt: null,

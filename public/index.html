@@ -420,6 +420,13 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
             <span class="hint mono" id="cfgAuth"></span>
             <span class="hint" id="zenKeyHint" style="min-height:16px"></span>
           </div>
+          <label>Client API key <span class="hint">(what your agent sends as its API key)</span></label>
+          <input id="cfgApiKey" type="text" readonly spellcheck="false" placeholder="no key yet — one is minted at boot or by Mint">
+          <div class="row" style="gap:8px;margin-top:2px">
+            <button type="button" class="primary" onclick="copyApiKey()" style="font-size:11px;padding:6px 10px">Copy key</button>
+            <button type="button" onclick="mintApiKey()" style="font-size:11px;padding:6px 10px">Mint new</button>
+            <span class="hint" id="apiKeyHint" style="min-height:16px"></span>
+          </div>
         </div>
         <div>
           <label>Default model <span class="hint">(empty = auto-pick healthy free model)</span></label><input id="cfgDefault" type="text">
@@ -953,8 +960,44 @@ function jsStr(s) {
   return JSON.stringify(String(s ?? "")).replace(/'/g, "\\x27").replace(/&/g, "\\u0026")
 }
 
+// ---- client API key (the one an agent sends) ---------------------------------
+// Shown here so it can be copied like the Zen key above. Stored plaintext for
+// display only; requests authenticate against the SHA-256.
+let currentApiKey = ""
+
+async function loadApiKey() {
+  try {
+    const data = await api("/api/keys")
+    currentApiKey = (data.keys || [])[0]?.key || ""
+    $("cfgApiKey").value = currentApiKey
+    $("apiKeyHint").textContent = currentApiKey
+      ? (data.keys.length > 1 ? `${data.keys.length} keys exist — showing the first` : "")
+      : "no key yet — one is minted at boot on a public bind"
+  } catch { /* unauthorized routes to showAuth */ }
+}
+
+function copyApiKey() {
+  if (!currentApiKey) return toast("No key to copy", "bad")
+  navigator.clipboard?.writeText(currentApiKey).then(() => toast("Key copied")).catch(() => {
+    const r = document.createRange(); r.selectNodeContents($("cfgApiKey"))
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r)
+    document.execCommand("copy"); toast("Key copied")
+  })
+}
+
+async function mintApiKey() {
+  // Keeps the old key: callers already configured with it stay working.
+  try {
+    await api("/api/keys", { method: "POST", body: JSON.stringify({ name: "dashboard " + new Date().toISOString().slice(0, 10) }) })
+    await loadApiKey()
+    toast("New key minted — copy it now")
+  } catch (e) {
+    if (e.message !== "unauthorized") toast("Mint failed: " + e.message, "bad")
+  }
+}
+
 async function refreshAll() {
-  try { await refreshStatus(); await refreshModels() } catch (e) { if (e.message === "unauthorized") showAuth() }
+  try { await refreshStatus(); await refreshModels(); await loadApiKey() } catch (e) { if (e.message === "unauthorized") showAuth() }
 }
 
 if (key) {
