@@ -26,8 +26,8 @@ function hashKey(key) {
 }
 
 /**
- * Mint a new key. Returns the plaintext ONCE — never written to disk in that
- * form, so it cannot be recovered; mint another instead.
+ * Mint the proxy's key, replacing any existing one. The previous key stops
+ * authenticating immediately.
  */
 export function createApiKey(name = "") {
   const key = KEY_PREFIX + randomBytes(KEY_BYTES).toString("base64url")
@@ -42,8 +42,20 @@ export function createApiKey(name = "") {
     createdAt: new Date().toISOString(),
     lastUsedAt: null,
   }
-  saveConfig({ apiKeys: [...config.apiKeys, entry] })
+  // Exactly one key exists at a time: minting replaces whatever was there.
+  // A second live key is a second way in that nobody remembers to revoke.
+  saveConfig({ apiKeys: [entry] })
   return { key, entry }
+}
+
+/**
+ * Replace the current key with a fresh one. Same thing as minting, named for
+ * what the operator means: regenerate.
+ */
+export function regenerateApiKey(name = "") {
+  const previous = config.apiKeys[0]?.id ?? null
+  const out = createApiKey(name || config.apiKeys[0]?.name || "")
+  return { ...out, replaced: previous }
 }
 
 export function revokeApiKey(id) {

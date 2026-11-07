@@ -433,7 +433,7 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
           <label>Client API keys <span class="hint">(what your agent sends as its API key)</span></label>
           <div id="apiKeyList"></div>
           <div class="row" style="gap:8px;margin-top:2px">
-            <button type="button" onclick="mintApiKey()" style="font-size:11px;padding:6px 10px">Mint new</button>
+            <button type="button" onclick="regenerateApiKey()" style="font-size:11px;padding:6px 10px">Regenerate</button>
             <span class="hint" id="apiKeyHint" style="min-height:16px"></span>
           </div>
           <label>Timeout (ms)</label><input id="cfgTimeout" type="number">
@@ -971,7 +971,7 @@ let keyList = []
 async function loadApiKey() {
   try {
     const data = await api("/api/keys")
-    keyList = data.keys || []
+    keyList = (data.keys || []).slice(0, 1)
     renderApiKeys()
   } catch { /* unauthorized routes to showAuth */ }
 }
@@ -997,12 +997,12 @@ function renderApiKeys() {
         <div class="row" style="gap:6px">
           ${k.key ? `<button onclick="toggleKey('${escapeAttr(k.id)}')">${shown ? "Hide" : "Show"}</button>
           <button onclick="copyKey('${escapeAttr(k.id)}')">Copy</button>` : ""}
-          <button onclick="revokeKey('${escapeAttr(k.id)}')">Revoke</button>
+          <button onclick="revokeKey('${escapeAttr(k.id)}')">Remove</button>
         </div>
       </div>`
     }).join("")
   }
-  $("apiKeyHint").textContent = keyList.length > 1 ? `${keyList.length} keys — any of them works` : ""
+  $("apiKeyHint").textContent = keyList.length ? "regenerate replaces this key — anyone using the old one gets 401" : ""
 }
 
 const revealed = new Set()
@@ -1022,14 +1022,20 @@ function copyKey(id) {
   })
 }
 
-async function mintApiKey() {
-  // Keeps existing keys: callers already configured with them keep working.
+async function regenerateApiKey() {
+  // Replaces the single key. The previous one stops working immediately, so
+  // confirm first and reveal the new value after.
+  if (keyList.length && !confirm("Regenerate the API key? The current key stops working immediately — any agent using it must be updated.")) return
   try {
-    await api("/api/keys", { method: "POST", body: JSON.stringify({ name: "key " + new Date().toISOString().slice(0, 10) }) })
+    await api("/api/keys", { method: "POST", body: JSON.stringify({ name: keyList[0]?.name || "" }) })
+    if (keyList[0]) revealed.delete(keyList[0].id)
     await loadApiKey()
-    toast("New key minted — copy it now")
+    // Show it straight away: a regenerated key is useless until copied.
+    const fresh = keyList[0]
+    if (fresh) { revealed.add(fresh.id); renderApiKeys() }
+    toast("New key generated — copy it now")
   } catch (e) {
-    if (e.message !== "unauthorized") toast("Mint failed: " + e.message, "bad")
+    if (e.message !== "unauthorized") toast("Regenerate failed: " + e.message, "bad")
   }
 }
 

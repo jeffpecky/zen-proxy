@@ -21,6 +21,7 @@ export {
 } from "./config.mjs"
 export {
   createApiKey,
+  regenerateApiKey,
   revokeApiKey,
   listApiKeys,
   resolveApiKey,

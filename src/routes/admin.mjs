@@ -1,5 +1,5 @@
 // Dashboard and admin routes, including their auth and origin guards.
-import { authRequired, createApiKey, dashboardAuthRequired, listApiKeys, revokeApiKey } from "../apikeys.mjs"
+import { authRequired, dashboardAuthRequired, listApiKeys, regenerateApiKey, revokeApiKey } from "../apikeys.mjs"
 // re-exported below for the router
 import { loadShippedModels } from "../catalogs.mjs"
 import { DEFAULT_CONFIG, config, isFallbackModelsPinned, maskKey, sanitize, saveConfig, setFallbackModelsPinned } from "../config.mjs"
@@ -212,10 +212,11 @@ async function handleApiKeys(req, res) {
     } catch {
       return json(res, 400, { error: "invalid JSON body" })
     }
-    const { key, entry } = createApiKey(name)
-    log(`api key created: ${entry.name || entry.id}`)
-    // 201 with the plaintext — the only time it is ever returned.
-    return json(res, 201, { key, id: entry.id, name: entry.name, createdAt: entry.createdAt })
+    // One key at a time: this regenerates rather than accumulating. The old
+    // key stops working the moment this returns.
+    const { key, entry, replaced } = regenerateApiKey(name)
+    log(replaced ? `api key regenerated: ${entry.name || entry.id}` : `api key created: ${entry.name || entry.id}`)
+    return json(res, 201, { key, id: entry.id, name: entry.name, createdAt: entry.createdAt, replaced })
   }
   if (req.method === "DELETE") {
     const id = new URL(req.url, "http://x").searchParams.get("id") || ""

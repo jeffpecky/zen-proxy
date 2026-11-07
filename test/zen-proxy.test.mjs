@@ -2423,6 +2423,45 @@ describe("/api/keys (hashed keys admin API)", () => {
   })
 })
 
+describe("exactly one client key exists (regenerate, not accumulate)", () => {
+  test("minting again replaces the key and invalidates the previous one", () => {
+    const first = zp.createApiKey("first")
+    const second = zp.createApiKey("second")
+    assert.equal(zp.config.apiKeys.length, 1, "one key at a time")
+    assert.equal(zp.config.apiKeys[0].id, second.entry.id)
+    assert.equal(zp.resolveApiKey(first.key), null, "the replaced key stops authenticating")
+    assert.ok(zp.resolveApiKey(second.key))
+  })
+
+  test("regenerate reports what it replaced", () => {
+    const before = zp.createApiKey("keep-name")
+    const out = zp.regenerateApiKey()
+    assert.equal(out.replaced, before.entry.id)
+    assert.equal(out.entry.name, "keep-name", "the name carries over")
+    assert.equal(zp.config.apiKeys.length, 1)
+    assert.ok(zp.resolveApiKey(out.key))
+    assert.equal(zp.resolveApiKey(before.key), null)
+  })
+
+  test("POST /api/keys regenerates rather than adding a second key", async () => {
+    zp.saveConfig({ adminPassword: "secret-admin", apiKeys: [] })
+    const call = async (body) => {
+      const res = mockRes()
+      await zp.handleApiKeys(
+        mockReq({ method: "POST", url: "/api/keys", headers: { "content-type": "application/json", authorization: "Bearer secret-admin" }, _body: JSON.stringify(body) }),
+        res,
+      )
+      return JSON.parse(res.body)
+    }
+    const a = await call({ name: "laptop" })
+    const b = await call({ name: "" })
+    assert.equal(zp.config.apiKeys.length, 1)
+    assert.equal(b.replaced, a.id, "the response says a key was replaced")
+    assert.equal(zp.resolveApiKey(a.key), null)
+    assert.ok(zp.resolveApiKey(b.key))
+  })
+})
+
 describe("bootstrap key for public binds (9router parity)", () => {
   test("loopback with no credentials stays open — nothing minted", () => {
     zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1" })

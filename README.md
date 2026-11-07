@@ -172,7 +172,7 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 | `responsesModels` | `["gpt-5*","gpt-6*","grok-*","muse-spark-*"]` | Models served on `/v1/responses`; patterns may end in `*` |
 | `defaultZenKey` | `""` | Your own Zen key instead of anonymous `public`; a 429 that says the *identity's* free allowance is spent ("Free usage limit reached") retries that same attempt once under this key before walking the chain — the shared-bucket cooldown never escalates |
 | `adminPassword` | `""` (no default) | Dashboard login only (`ADMIN_PASSWORD`). Opens `/` and `/api/*`; **does not** authenticate model calls. Empty + loopback = open dashboard; empty + any other bind = generated at boot and printed once |
-| `apiKeys` | `[]` | Client keys (`sk-…`) that authenticate **model calls**. Listed in Settings under the Zen key — masked, with Show / Copy / Revoke per key, the same layout 9router uses — and minted with `POST /api/keys`. **Not** a dashboard login |
+| `apiKeys` | `[]` | Client keys (`sk-…`) that authenticate **model calls**. Shown in Settings under the Zen key, masked with Show / Copy, and replaced with **Regenerate** (`POST /api/keys`). Exactly one key exists at a time — regenerating invalidates the previous one immediately, so there is never a second credential nobody remembers to revoke. **Not** a dashboard login |
 | `requireApiKey` | `false` | Force auth even on a loopback bind behind a reverse proxy (`REQUIRE_API_KEY=1`) |
 | `rateLimitMax` / `rateLimitWindowMs` | `0` (off) / `60000` | Per-client rate limiting; local callers are split by user-agent family so several agents behind the same address do not share one budget |
 | `timeoutMs` / `cacheMs` | `120000` / `30000` | Upstream *silence* timeout (re-armed on every chunk, so long replies are not cut), `/v1/models` cache TTL |
@@ -190,7 +190,7 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 | **Admin password** (`adminPassword`) | Logs into the dashboard and `/api/*`. Nothing else | `zen-proxy.json`, masked in the UI. Env: `ADMIN_PASSWORD` |
 | **Client key** (`sk-…` in `apiKeys`) | Authenticates model calls on `/v1/*`. Nothing else — it does **not** log into the dashboard | Hash only (SHA-256), shown once at mint |
 
-A client key starts with `sk-` + 43 base64url chars (256 bits from the CSPRNG) and is minted at first boot on a public bind, or via `POST /api/keys`. Modelled on 9router's lifecycle, hardened for a public host: authentication always compares the SHA-256 in constant time — never the stored plaintext, which exists only so the dashboard can show and copy the key. Revoke with `DELETE /api/keys?id=…` (holders get `401` immediately). Several keys so a leaked one is dropped without rotating the rest — still one user, not multi-tenant.
+A client key starts with `sk-` + 43 base64url chars (256 bits from the CSPRNG) and is minted at first boot on a public bind, or via `POST /api/keys`. Modelled on 9router's lifecycle, hardened for a public host: authentication always compares the SHA-256 in constant time — never the stored plaintext, which exists only so the dashboard can show and copy the key. Revoke with `DELETE /api/keys?id=…` (holders get `401` immediately). 
 
 On a non-loopback bind with neither credential set, **both are generated at boot and printed once** — the password for the UI, a key for your agents.
 
