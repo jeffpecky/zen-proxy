@@ -417,7 +417,6 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
           <label>API key <span class="hint">(what your agent sends as its API key)</span></label><input id="cfgApiKey" type="text" readonly spellcheck="false">
           <div class="row" style="gap:8px;margin-top:2px">
             <button type="button" class="primary" onclick="copyApiKey()" style="font-size:11px;padding:6px 10px">Copy key</button>
-            <button type="button" onclick="regenerateApiKey()" style="font-size:11px;padding:6px 10px">Regenerate</button>
             <span class="hint" id="apiKeyHint" style="min-height:16px"></span>
           </div>
         </div>
@@ -960,7 +959,7 @@ function jsStr(s) {
 }
 
 // ---- client API key (mirrors the Zen key field above it) ---------------------
-// One key exists at a time; Regenerate replaces it and the old one stops working.
+// One key exists at a time. This row only shows and copies it.
 let currentApiKey = ""
 
 async function loadApiKey() {
@@ -971,30 +970,18 @@ async function loadApiKey() {
     $("cfgApiKey").value = currentApiKey
     $("apiKeyHint").textContent = currentApiKey
       ? ""
-      : k ? "existing key is hash-only (older build) — press Regenerate to get a readable one"
+      : k ? "existing key was minted by an older build and is not readable here"
           : "no key yet"
   } catch { /* unauthorized routes to showAuth */ }
 }
 
 function copyApiKey() {
-  if (!currentApiKey) return toast("No key to copy — press Regenerate", "bad")
+  if (!currentApiKey) return toast("No API key to copy", "bad")
   navigator.clipboard?.writeText(currentApiKey).then(() => toast("Key copied")).catch(() => {
     const inp = $("cfgApiKey")
     inp.removeAttribute("readonly"); inp.select(); document.execCommand("copy"); inp.setAttribute("readonly", "readonly")
     toast("Key copied")
   })
-}
-
-async function regenerateApiKey() {
-  if (!confirm("Regenerate the API key? The current key stops working immediately — any agent using it must be updated.")) return
-  try {
-    await api("/api/keys", { method: "POST", body: JSON.stringify({ name: "" }) })
-    currentApiKey = ""
-    await loadApiKey()
-    toast("New API key generated — copy it now")
-  } catch (e) {
-    if (e.message !== "unauthorized") toast("Regenerate failed: " + e.message, "bad")
-  }
 }
 
 async function refreshAll() {

@@ -101,10 +101,6 @@ server.listen(config.port, config.host, () => {
   }
 
   // A public bind with no credential would be an open relay (and the anonymous
-  // `public` tier is the only thing a stranger would need to drain it). Mint one
-  // at boot and print it once — the config file still holds it, but the log is
-  // where the operator looks first.
-  // A public bind with no credential would be an open relay (and the anonymous
   // `public` tier is the only thing a stranger would need to drain it). Mint
   // both secrets at boot and print them once — each is stored once, the
   // password in the 0600 config file, the key only as a hash.
