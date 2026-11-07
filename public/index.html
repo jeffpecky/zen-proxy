@@ -269,10 +269,6 @@ label::before { content:"▸ "; color:var(--coral) }
 .formgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:0 24px }
 textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:12.5px }
 .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap }
-.keyrow { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 0; border-bottom:1px dashed rgba(0,0,0,.12) }
-.keyrow:last-child { border-bottom:0 }
-.keymeta { display:flex; flex-direction:column; min-width:120px; gap:2px }
-.keyval { flex:1; min-width:180px; overflow-wrap:anywhere; word-break:break-all }
 .row .grow { flex:1 }
 .checkbox { display:flex; align-items:center; gap:10px; margin-top:18px }
 .checkbox input { width:auto; accent-color:var(--coral) }
@@ -418,6 +414,12 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
           <label>Port</label><input id="cfgPort" type="number">
           <label>Upstream url</label><input id="cfgUpstream" type="text">
           <label>User-agent (the unlock)</label><input id="cfgUa" type="text">
+          <label>API key <span class="hint">(what your agent sends as its API key)</span></label><input id="cfgApiKey" type="text" readonly spellcheck="false">
+          <div class="row" style="gap:8px;margin-top:2px">
+            <button type="button" class="primary" onclick="copyApiKey()" style="font-size:11px;padding:6px 10px">Copy key</button>
+            <button type="button" onclick="regenerateApiKey()" style="font-size:11px;padding:6px 10px">Regenerate</button>
+            <span class="hint" id="apiKeyHint" style="min-height:16px"></span>
+          </div>
         </div>
         <div>
           <label>Default model <span class="hint">(empty = auto-pick healthy free model)</span></label><input id="cfgDefault" type="text">
@@ -429,12 +431,6 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
             <button type="button" class="primary" onclick="testZenKey()" style="font-size:11px;padding:6px 10px">Test key</button>
             <span class="hint mono" id="cfgAuth"></span>
             <span class="hint" id="zenKeyHint" style="min-height:16px"></span>
-          </div>
-          <label>Client API keys <span class="hint">(what your agent sends as its API key)</span></label>
-          <div id="apiKeyList"></div>
-          <div class="row" style="gap:8px;margin-top:2px">
-            <button type="button" onclick="regenerateApiKey()" style="font-size:11px;padding:6px 10px">Regenerate</button>
-            <span class="hint" id="apiKeyHint" style="min-height:16px"></span>
           </div>
           <label>Timeout (ms)</label><input id="cfgTimeout" type="number">
         </div>
@@ -963,91 +959,41 @@ function jsStr(s) {
   return JSON.stringify(String(s ?? "")).replace(/'/g, "\\x27").replace(/&/g, "\\u0026")
 }
 
-// ---- client API keys --------------------------------------------------------
-// 9router's shape: every key listed, masked, with Show / Copy / Revoke per row.
-// Keys minted before plaintext storage only have a hash and are marked as such.
-let keyList = []
+// ---- client API key (mirrors the Zen key field above it) ---------------------
+// One key exists at a time; Regenerate replaces it and the old one stops working.
+let currentApiKey = ""
 
 async function loadApiKey() {
   try {
     const data = await api("/api/keys")
-    keyList = (data.keys || []).slice(0, 1)
-    renderApiKeys()
+    const k = (data.keys || [])[0]
+    currentApiKey = k?.key || ""
+    $("cfgApiKey").value = currentApiKey
+    $("apiKeyHint").textContent = currentApiKey
+      ? ""
+      : k ? "existing key is hash-only (older build) — press Regenerate to get a readable one"
+          : "no key yet"
   } catch { /* unauthorized routes to showAuth */ }
 }
 
-function maskSk(k) {
-  if (!k) return ""
-  if (k.length <= 14) return "••••••••"
-  return k.slice(0, 6) + "••••••••••••" + k.slice(-4)
-}
-
-function renderApiKeys() {
-  const box = $("apiKeyList")
-  if (!keyList.length) {
-    box.innerHTML = `<div class="hint">no key yet — one is minted at boot on a public bind</div>`
-  } else {
-    box.innerHTML = keyList.map((k) => {
-      const shown = revealed.has(k.id)
-      const label = k.name ? escapeHtml(k.name) : `<code>${escapeAttr(k.id)}</code>`
-      const value = k.key ? (shown ? k.key : maskSk(k.key)) : "hash-only key — not readable, mint a new one"
-      return `<div class="keyrow">
-        <div class="keymeta"><span>${label}</span><span class="hint">${k.createdAt ? new Date(k.createdAt).toLocaleDateString() : ""}${k.lastUsedAt ? " · used " + new Date(k.lastUsedAt).toLocaleDateString() : ""}</span></div>
-        <code class="keyval mono" title="${shown ? "Hide" : "Show"}">${escapeHtml(value)}</code>
-        <div class="row" style="gap:6px">
-          ${k.key ? `<button onclick="toggleKey('${escapeAttr(k.id)}')">${shown ? "Hide" : "Show"}</button>
-          <button onclick="copyKey('${escapeAttr(k.id)}')">Copy</button>` : ""}
-          <button onclick="revokeKey('${escapeAttr(k.id)}')">Remove</button>
-        </div>
-      </div>`
-    }).join("")
-  }
-  $("apiKeyHint").textContent = keyList.length ? "regenerate replaces this key — anyone using the old one gets 401" : ""
-}
-
-const revealed = new Set()
-
-function toggleKey(id) {
-  revealed.has(id) ? revealed.delete(id) : revealed.add(id)
-  renderApiKeys()
-}
-
-function copyKey(id) {
-  const k = keyList.find((x) => x.id === id)
-  if (!k?.key) return toast("Nothing to copy", "bad")
-  navigator.clipboard?.writeText(k.key).then(() => toast("Key copied")).catch(() => {
-    const ta = document.createElement("textarea")
-    ta.value = k.key; document.body.appendChild(ta); ta.select()
-    document.execCommand("copy"); ta.remove(); toast("Key copied")
+function copyApiKey() {
+  if (!currentApiKey) return toast("No key to copy — press Regenerate", "bad")
+  navigator.clipboard?.writeText(currentApiKey).then(() => toast("Key copied")).catch(() => {
+    const inp = $("cfgApiKey")
+    inp.removeAttribute("readonly"); inp.select(); document.execCommand("copy"); inp.setAttribute("readonly", "readonly")
+    toast("Key copied")
   })
 }
 
 async function regenerateApiKey() {
-  // Replaces the single key. The previous one stops working immediately, so
-  // confirm first and reveal the new value after.
-  if (keyList.length && !confirm("Regenerate the API key? The current key stops working immediately — any agent using it must be updated.")) return
+  if (!confirm("Regenerate the API key? The current key stops working immediately — any agent using it must be updated.")) return
   try {
-    await api("/api/keys", { method: "POST", body: JSON.stringify({ name: keyList[0]?.name || "" }) })
-    if (keyList[0]) revealed.delete(keyList[0].id)
+    await api("/api/keys", { method: "POST", body: JSON.stringify({ name: "" }) })
+    currentApiKey = ""
     await loadApiKey()
-    // Show it straight away: a regenerated key is useless until copied.
-    const fresh = keyList[0]
-    if (fresh) { revealed.add(fresh.id); renderApiKeys() }
-    toast("New key generated — copy it now")
+    toast("New API key generated — copy it now")
   } catch (e) {
     if (e.message !== "unauthorized") toast("Regenerate failed: " + e.message, "bad")
-  }
-}
-
-async function revokeKey(id) {
-  if (!confirm("Revoke this key? Callers holding it get 401 immediately.")) return
-  try {
-    await api(`/api/keys?id=${encodeURIComponent(id)}`, { method: "DELETE" })
-    revealed.delete(id)
-    await loadApiKey()
-    toast("Key revoked")
-  } catch (e) {
-    if (e.message !== "unauthorized") toast("Revoke failed: " + e.message, "bad")
   }
 }
 
