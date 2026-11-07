@@ -414,6 +414,12 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
           <label>Port</label><input id="cfgPort" type="number">
           <label>Upstream url</label><input id="cfgUpstream" type="text">
           <label>User-agent (the unlock)</label><input id="cfgUa" type="text">
+        </div>
+        <div>
+          <label>Default model <span class="hint">(empty = auto-pick healthy free model)</span></label><input id="cfgDefault" type="text">
+          <label>Admin password (dashboard login; empty = open)</label>
+          <input id="cfgAdminPassword" type="text" autocomplete="new-password" spellcheck="false">
+          <div class="hint" id="adminPwHint" style="min-height:16px;margin-top:4px"></div>
           <label>Zen key (byok, optional)</label><input id="cfgZenKey" type="password" autocomplete="new-password">
           <div class="row" style="gap:8px;margin-top:2px">
             <button type="button" class="primary" onclick="testZenKey()" style="font-size:11px;padding:6px 10px">Test key</button>
@@ -427,12 +433,6 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
             <button type="button" onclick="mintApiKey()" style="font-size:11px;padding:6px 10px">Mint new</button>
             <span class="hint" id="apiKeyHint" style="min-height:16px"></span>
           </div>
-        </div>
-        <div>
-          <label>Default model <span class="hint">(empty = auto-pick healthy free model)</span></label><input id="cfgDefault" type="text">
-          <label>Admin password (dashboard login; empty = open)</label>
-          <input id="cfgAdminPassword" type="text" autocomplete="new-password" spellcheck="false">
-          <div class="hint" id="adminPwHint" style="min-height:16px;margin-top:4px"></div>
           <label>Timeout (ms)</label><input id="cfgTimeout" type="number">
         </div>
       </div>
