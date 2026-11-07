@@ -25,7 +25,6 @@ export {
   revokeApiKey,
   listApiKeys,
   resolveApiKey,
-  authRequired,
   ensureDefaultKey,
   hashKey,
   KEY_RE,

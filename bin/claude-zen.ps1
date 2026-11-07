@@ -110,7 +110,7 @@ $maker = Join-Path $here "make-settings.mjs"
 if (-not (Test-Path $maker)) { $maker = Join-Path $root "bin\make-settings.mjs" }
 
 try {
-    $out = & node $maker $port $settings 2>$null
+    $out = & node $maker $port $settings $config 2>$null
     $count = if ($out) { [int]($out | Select-Object -Last 1) } else { 0 }
 } catch { $count = 0 }
 if ($count -le 0) { Fail "zen-claude: could not determine the free model list." }

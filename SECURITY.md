@@ -15,16 +15,23 @@ things security-relevant, and they are worth stating plainly so you can judge
 your own deployment:
 
 - **It holds credentials.** `zen-proxy.json` may contain a Zen API key
-  (`defaultZenKey`) and a proxy key (`proxyKey`). The file is written `0600`
-  through a temp file and a rename specifically so a secret is never readable at
-  the final path. Do not commit it; it is in `.gitignore`.
+  (`defaultZenKey`), a dashboard login password (`adminPassword`), and the client
+  API key. The file is written `0600` through a temp file and a rename
+  specifically so a secret is never readable at the final path. Do not commit
+  it; it is in `.gitignore`.
+- **A client API key is required on every model call.** There is no anonymous
+  path: every install mints an `sk-…` key at first boot, callers present it, and
+  authentication compares its SHA-256 in constant time. Removing the key from
+  `apiKeys` (or regenerating it) revokes access immediately.
 - **It binds to loopback by default** (`127.0.0.1`). If you set `host` to
-  `0.0.0.0`, you are publishing an unauthenticated-by-default proxy to your
-  network. Set `proxyKey` first. Anyone who can reach the port can spend your
-  quota and, with a BYOK key configured, your account's credentials.
-- **The dashboard is not authenticated unless `proxyKey` is set.** It exposes
-  config values and a log tail. Logs contain truncated session ids and project
-  hashes, not full ids, but they are still operational data.
+  `0.0.0.0`, anyone who can reach the port and holds the client key can spend
+  your quota and, with a BYOK key configured, your account's credentials. Set
+  `adminPassword` too before exposing it — the dashboard and `/api/*` are open
+  without one on any non-loopback bind only until boot mints one.
+- **The dashboard password is separate from the client key.** The password opens
+  the UI and `/api/*`; it never authenticates a model call. The client key
+  authenticates model calls and never logs in. Losing one does not imply the
+  other.
 - **Admin writes are origin- and content-type-gated** so a web page you happen
   to visit cannot reconfigure the proxy through your browser. Requests without
   a JSON content type are refused with `415`.

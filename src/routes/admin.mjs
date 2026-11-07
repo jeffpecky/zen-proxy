@@ -1,5 +1,5 @@
 // Dashboard and admin routes, including their auth and origin guards.
-import { authRequired, dashboardAuthRequired, listApiKeys, regenerateApiKey, revokeApiKey } from "../apikeys.mjs"
+import { dashboardAuthRequired, listApiKeys, regenerateApiKey, revokeApiKey } from "../apikeys.mjs"
 // re-exported below for the router
 import { loadShippedModels } from "../catalogs.mjs"
 import { DEFAULT_CONFIG, config, isFallbackModelsPinned, maskKey, sanitize, saveConfig, setFallbackModelsPinned } from "../config.mjs"
@@ -144,7 +144,6 @@ async function handleApiConfig(req, res) {
       cleaned.autoUA = toBool(cleaned.autoUA, config.autoUA)
       cleaned.injectSession = toBool(cleaned.injectSession, config.injectSession)
       cleaned.proxyStrict = toBool(cleaned.proxyStrict, config.proxyStrict)
-      cleaned.requireApiKey = toBool(cleaned.requireApiKey, config.requireApiKey)
       if (!Array.isArray(cleaned.proxyUrls)) cleaned.proxyUrls = config.proxyUrls
       else cleaned.proxyUrls = cleaned.proxyUrls.filter((u) => typeof u === "string" && u.trim())
       if (cleaned.probeAuth != null && !["auto", "key", "anonymous"].includes(String(cleaned.probeAuth))) {
@@ -198,7 +197,7 @@ async function handleApiConfig(req, res) {
 // mint response and never again.
 async function handleApiKeys(req, res) {
   if (!adminAuth(req, res)) return
-  if (req.method === "GET") return json(res, 200, { keys: listApiKeys(), authRequired: authRequired() })
+  if (req.method === "GET") return json(res, 200, { keys: listApiKeys() })
   // DELETE is not a "simple request" (no preflighted cross-origin page can send
   // one), so it needs the origin check but not the JSON content-type gate.
   if (req.method === "DELETE") {
@@ -240,7 +239,9 @@ async function handleStatus(req, res) {
   for (const [m, c] of requestStats.perMinute) {
     if (minute - m <= 5) last5m += c
   }
-  const authMode = config.defaultZenKey ? (config.apiKeys.length ? "key+byok" : "byok") : config.apiKeys.length ? "key" : "public"
+  // The client key is always required, so it is not a mode — what varies is the
+  // credential the proxy presents UPSTREAM: your Zen key, or the anonymous tier.
+  const authMode = config.defaultZenKey ? "byok" : "public"
   json(res, 200, {
     uptime: Math.floor(process.uptime()),
     upstreamOk: cache.ok,
@@ -249,7 +250,7 @@ async function handleStatus(req, res) {
     uaAutoVersion: uaAutoState.version,
     defaultModel: config.defaultModel,
     effectiveDefault: effectiveDefault(),
-    auth: { mode: authMode, zenKey: maskKey(config.defaultZenKey), adminPassword: !!config.adminPassword, apiKeys: config.apiKeys.length, required: authRequired() },
+    auth: { mode: authMode, zenKey: maskKey(config.defaultZenKey), adminPassword: !!config.adminPassword, apiKeys: config.apiKeys.length },
     responsesModels: [...(config.responsesModels ?? [])],
     rateLimit: { max: config.rateLimitMax, windowMs: config.rateLimitWindowMs },
     probeAuth: config.probeAuth ?? "auto",

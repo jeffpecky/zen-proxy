@@ -101,34 +101,27 @@ export function resolveApiKey(presented) {
   return null
 }
 
-/**
- * Do MODEL CALLS need a client key? Yes when any key exists, when
- * REQUIRE_API_KEY=1, or when bound to a non-loopback address. The dashboard
- * password plays no part here — it is a login, not an inference credential.
- */
-export function authRequired() {
-  if (config.apiKeys.length) return true
-  if (config.requireApiKey) return true
-  // Behind a reverse proxy the bind address is still loopback, so this cannot
-  // be the only signal — REQUIRE_API_KEY covers that deploy.
+function loopbackBind() {
   const host = String(config.host ?? "").trim().toLowerCase()
-  return !(host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]")
+  return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]"
 }
 
 /**
- * Does the DASHBOARD need a password? Same exposure rules as model calls, but
- * keyed on `adminPassword` instead of `apiKeys` — a client key existing must not
- * lock the UI, and a password existing must not gate inference.
+ * Does the DASHBOARD need a password? Only when one is set or the proxy is
+ * reachable off this machine. A loopback dashboard stays open on purpose: it is
+ * where the operator reads and copies the API key, and losing that behind a
+ * generated password would be a worse first run than an open port on localhost.
+ *
+ * (Model calls have no such rule: a client key is always required — see
+ * authForUpstream().)
  */
 export function dashboardAuthRequired() {
   if (config.adminPassword) return true
-  if (config.requireApiKey) return true
-  const host = String(config.host ?? "").trim().toLowerCase()
-  return !(host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]")
+  return !loopbackBind()
 }
 
 /**
- * Provision the credentials a first-time public install needs, the way 9router
+ * Provision the credentials a first-time install needs, the way 9router
  * auto-provisions a "Default Key" so the endpoint works out of the box.
  *
  * Two DIFFERENT secrets, because they answer two different questions:
@@ -137,12 +130,15 @@ export function dashboardAuthRequired() {
  *   - a minted `sk-…` in the hashed `apiKeys` list calls models (9router's
  *     `apiKeys` table gating `/v1/*`).
  * Neither authenticates the other's job. Returns whichever were created, or
- * null when auth is off / credentials already exist.
+ * null when both already exist.
+ *
+ * Runs on EVERY bind, loopback included: the key is the only way in — there is
+ * no anonymous tier — so an install without one would be a proxy nobody can
+ * call. It is also what the dashboard shows and copies.
  */
 export function ensureDefaultKey() {
-  if (!authRequired()) return null
   const out = {}
-  if (!config.adminPassword) {
+  if (!config.adminPassword && !loopbackBind()) {
     // A password, not an API key: no `sk-` prefix, and never resolved by
     // resolveApiKey() — a bare random string can only open the dashboard.
     out.adminPassword = randomBytes(18).toString("base64url")

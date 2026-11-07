@@ -147,5 +147,5 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
 }
 Info "  Point your AI agent at:"
 Info "    baseURL = http://127.0.0.1:$Port/v1"
-Info "    apiKey  = public"
+Info "    apiKey  = <the client key printed at first boot, or Settings → API key>"
 Info "    model   = space-bunny-free   (or any model listed in the dashboard)"

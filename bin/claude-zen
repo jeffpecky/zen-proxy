@@ -120,7 +120,7 @@ fi
 
 # ---- 4. Build settings that list every free model -------------------------
 SETTINGS="$(mktemp "${TMPDIR:-/tmp}/zen-claude-settings.XXXXXX.json")"
-if ! COUNT="$(node "$HERE/make-settings.mjs" "$PORT" "$SETTINGS" 2>/dev/null)" || [ "${COUNT:-0}" -eq 0 ]; then
+if ! COUNT="$(node "$HERE/make-settings.mjs" "$PORT" "$SETTINGS" "$CONFIG" 2>/dev/null)" || [ "${COUNT:-0}" -eq 0 ]; then
   die "zen-claude: could not determine the free model list."
 fi
 

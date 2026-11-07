@@ -19,7 +19,7 @@ anonymous free tier  ◦  no accounts  ◦  no keys  ◦  openai + anthropic com
 **What it enables:**
 
 - **Free models outside opencode, over either API** — OpenAI-compatible agents *and* Claude Code, keep the free tier
-- **Anonymous access with no accounts or keys** (`Bearer public`), or bring your own Zen key (BYOK) for your own quota
+- **One client key per install**, minted at first boot; upstream stays anonymous (`Bearer public`) unless you bring your own Zen key (BYOK) for your own quota
 - **Smart model fallback** — when one free model is saturated, it rolls to the next
 - **Model aliases** — call them `gpt-4o` or `claude-3-5`, get routed to free models
 - **Self-updating** — tracks new opencode releases (auto User-Agent) and a GitHub Action keeps the shipped free-model list current as models come and go
@@ -87,7 +87,7 @@ bun zen-proxy.mjs            # or the installer's `zen-proxy` launcher
 |---|---|
 | Dashboard / admin UI | `http://127.0.0.1:8181/` |
 | OpenAI base URL | `http://127.0.0.1:8181/v1` |
-| API key | `public` (any value once you set `proxyKey`) |
+| API key | the client key — printed at first boot, or Settings → API key (**Copy key**). Required on every call |
 | Example model | `mimo-v2.5-free` (auto default picks a healthy free model) |
 | Health check | `http://127.0.0.1:8181/health` |
 
@@ -100,7 +100,7 @@ Cline / Roo / Continue / Aider / mimo — anywhere you configure an OpenAI-compa
   "provider": {
     "zen": {
       "baseURL": "http://127.0.0.1:8181/v1",
-      "apiKey": "public",
+      "apiKey": "sk-…",   // your proxy's client key — Settings → API key
       "models": { "mimo-v2.5-free": {} }
     }
   }
@@ -123,12 +123,13 @@ manage everything, no config files
 
 - **Overview** — upstream health, uptime, request counters, live recent-request feed with status + latency
 - **Models** — add/remove allowed models, pick the default, one-click **Test** per model
-- **Settings** — edit host, port, upstream URL, User-Agent, proxy key, BYOK key, timeout, fallback list, aliases; saved to `zen-proxy.json` and applied instantly
+- **Settings** — edit host, port, upstream URL, User-Agent, the client API key (masked, Copy key), the dashboard password, the BYOK key, timeout, fallback list, aliases; saved to `zen-proxy.json` and applied instantly
 - **Logs** — live terminal-style log tail
 
-Set `proxyKey` and both the dashboard and the API require that key (`Authorization:
-Bearer` or `x-api-key`). The proxy key is the proxy's own secret: it is checked
-and then dropped, never forwarded to the upstream. Mutating `/api/*` requests must
+Two credentials, two jobs. A client key (`sk-…`) is **required** on every model
+call (sent as `Authorization: Bearer` or `x-api-key`) and is never forwarded
+upstream. The dashboard password (`adminPassword`) logs into the UI and `/api/*`
+and nothing else — it does not authenticate inference. Mutating `/api/*` requests must
 also be same-origin and `content-type: application/json`, so a web page cannot
 rewrite the config and redirect your Zen key to another host.
 
@@ -156,7 +157,7 @@ If `zen-claude` reports `command not found`, check the symlink exists before bla
 
 ## Anthropic API (Claude Code)
 
-`POST /v1/messages` and `POST /v1/messages/count_tokens` implement the Anthropic Messages protocol: system blocks, message content blocks, images, `tool_use`/`tool_result`, `thinking`, `tool_choice` and `stop_sequences` are all translated to the endpoint family the target model actually uses, and the reply is translated back including the full streaming envelope (`message_start` → `content_block_*` → `message_delta` → `message_stop`). Errors use Anthropic's `{type:"error",error:{type,message}}` shape. Both `x-api-key` and `Authorization: Bearer` authenticate, and both routes require the proxy key when `proxyKey` is set.
+`POST /v1/messages` and `POST /v1/messages/count_tokens` implement the Anthropic Messages protocol: system blocks, message content blocks, images, `tool_use`/`tool_result`, `thinking`, `tool_choice` and `stop_sequences` are all translated to the endpoint family the target model actually uses, and the reply is translated back including the full streaming envelope (`message_start` → `content_block_*` → `message_delta` → `message_stop`). Errors use Anthropic's `{type:"error",error:{type,message}}` shape. Both `x-api-key` and `Authorization: Bearer` carry the client key, which both routes require.
 
 The free tier accepts a request only when it carries opencode's own v2 tool manifest, so the manifest rides on **every** request: opencode's 12 tools go first, the caller's own tools after them (an exact-name collision dedupes to the manifest's schema). The harness preamble is prepended ahead of the caller's system prompt — everything the caller sent still follows, nothing is edited away, and the prepend is idempotent. Calls whose mapped name the caller actually offers are renamed back (`read`→`Read`, `filePath`→`file_path`, …) so the caller runs the tool it knows; anything else is not returnable. Disable with `agentTools: false`.
 
@@ -192,7 +193,8 @@ Config lives in **`zen-proxy.json`** (auto-created on first run, hot-reloaded wh
 | `rateLimitMax` | `0` (off) | Max chat requests per client per window — `0` disables the limiter. Local callers are split by user-agent family, so several agents behind one address get separate budgets |
 | `rateLimitWindowMs` | `60000` | Rate-limit window |
 | `modelAliases` | `{}` | e.g. `{"gpt-4o":"mimo-v2.5-free"}` — reply model rewritten back |
-| `proxyKey` | `""` | If set, clients must send it — as `Authorization: Bearer` or `x-api-key`; locks the dashboard too. It is the proxy's own secret and is never forwarded upstream |
+| `apiKeys` | *(minted at first boot)* | Client keys (`sk-…`) required on every model call. Exactly one at a time; `POST /api/keys` regenerates. Stored with a plaintext copy for display and a SHA-256 for auth |
+| `adminPassword` | `""` | Dashboard login only (`ADMIN_PASSWORD`). Never authenticates model calls. Empty + loopback = open dashboard; empty + other bind = generated at boot |
 | `defaultZenKey` | `""` | Your own Zen key (BYOK) instead of anonymous `public`. On the one 429 that means your identity's own allowance is spent (the "Free usage limit reached" pitch, not the shared-bucket cooldown), the same attempt is retried once under this key before the fallback chain walks on |
 | `trustForwarded` | `false` | Trust `x-forwarded-for`/`x-real-ip` from a reverse proxy |
 | `timeoutMs` | `120000` | Upstream *silence* timeout, re-armed on every chunk so long replies are not cut |
@@ -202,7 +204,7 @@ Env vars: `HOST`, `PORT`, `ZEN_URL`, `ZEN_UA`, `INJECT_SESSION` (`0` to disable)
 
 ### bring your own key
 
-Anonymous `public` access rides opencode's shared free pool (per-IP quota, sometimes saturated). For stable, reliable use set `defaultZenKey` to your own free Zen key — or send it per request as `x-zen-key` / a non-`public` bearer token.
+Upstream rides opencode's shared free pool (`Bearer public`, per-IP quota, sometimes saturated) unless `defaultZenKey` is set. For stable, reliable use set `defaultZenKey` to your own free Zen key — or send it per request as `x-zen-key`. Your agent always authenticates to the proxy with its client key.
 
 ---
 

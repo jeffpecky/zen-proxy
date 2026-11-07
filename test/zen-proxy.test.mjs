@@ -45,6 +45,9 @@ const DEFAULT_MODEL = zp.config.defaultModel || zp.config.fallbackModels[0] || "
 // tools everywhere the manifest rides.
 const manifestNames = () => zp.loadAgentTools().map((t) => t.function.name)
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url))
+// Every model call needs a client key now, so the harness holds one and
+// mockReq() presents it unless a test supplies its own credential.
+let TEST_KEY = ""
 // Git Bash (Windows) mangles backslash paths; forward slashes work everywhere
 const toPosix = (p) => p.replace(/\\/g, "/")
 
@@ -52,8 +55,12 @@ const toPosix = (p) => p.replace(/\\/g, "/")
 
 function mockReq(over = {}) {
   const body = over._body ?? ""
+  // A client key is required on every model call, so an unauthenticated mock
+  // request is a 401 by definition. Tests that exercise auth pass their own
+  // header explicitly; everything else rides the harness key.
+  const headers = { ...(over.headers ?? {}) }
+  if (TEST_KEY && !over._anonymous && !headers.authorization && !headers["x-api-key"]) headers.authorization = `Bearer ${TEST_KEY}`
   return {
-    headers: over.headers ?? {},
     socket: { remoteAddress: over.remoteAddress ?? "127.0.0.1" },
     method: over.method ?? "POST",
     url: over.url ?? "/v1/chat/completions",
@@ -64,6 +71,8 @@ function mockReq(over = {}) {
       yield body
     },
     ...over,
+    // After the spread: `over.headers` would otherwise drop the injected key.
+    headers,
   }
 }
 
@@ -168,6 +177,8 @@ let originalConfig
 beforeEach(() => {
   globalThis.fetch = originalFetch
   if (originalConfig) zp.saveConfig(originalConfig)
+  // Re-arm the harness key: a previous suite may have replaced or revoked it.
+  TEST_KEY = zp.resolveApiKey(TEST_KEY) ? TEST_KEY : zp.createApiKey("test harness").key
   Object.assign(zp.requestStats, { total: 0, errors: 0, recent: [], perMinute: new Map(), window60: [] })
   Object.assign(zp.syncState, { at: 0, ok: false, running: false, ms: 0, working: [], rateLimited: [], flaky: [], dead: [], error: "" })
 })
@@ -207,20 +218,18 @@ describe("resolveModel", () => {
 })
 
 describe("authForUpstream", () => {
-  test("anonymous public when no client key and bearer is public", () => {
-    const req = mockReq({ headers: { authorization: "Bearer public" } })
-    assert.equal(zp.authForUpstream(req), "Bearer public")
+  test("there is no anonymous path: a bare request is refused", () => {
+    assert.equal(zp.authForUpstream(mockReq({ _anonymous: true, headers: { authorization: "Bearer public" } })), null)
+    assert.equal(zp.authForUpstream(mockReq({ _anonymous: true, headers: {} })), null)
   })
 
-  test("BYOK bearer forwarded when no client key", () => {
-    const req = mockReq({ headers: { authorization: "Bearer sk-abc" } })
-    assert.equal(zp.authForUpstream(req), "Bearer sk-abc")
+  test("a caller's own Zen key is not a client key", () => {
+    assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: "Bearer sk-abc" } })), null)
   })
 
-  test("defaultZenKey used when no bearer", () => {
+  test("defaultZenKey alone does not admit a caller", () => {
     zp.saveConfig({ defaultZenKey: "zen-123" })
-    const req = mockReq({ headers: {} })
-    assert.equal(zp.authForUpstream(req), "Bearer zen-123")
+    assert.equal(zp.authForUpstream(mockReq({ _anonymous: true, headers: {} })), null)
   })
 
   test("a minted key set: wrong bearer rejected", () => {
@@ -916,13 +925,14 @@ describe("auth visibility & key test", () => {
     globalThis.fetch = routeFetch([["/models", jsonResponse({ data: [] })]])
     let res = mockRes()
     await zp.handleStatus(mockReq(), res)
-    assert.equal(JSON.parse(res.body).auth.mode, "public")
+    let st = JSON.parse(res.body)
+    assert.equal(st.auth.mode, "public", "upstream sees the anonymous tier")
 
     zp.saveConfig({ defaultZenKey: "zen-secret-key-123", adminPassword: "" })
     globalThis.fetch = routeFetch([["/models", jsonResponse({ data: [] })]])
     res = mockRes()
     await zp.handleStatus(mockReq(), res)
-    const st = JSON.parse(res.body)
+    st = JSON.parse(res.body)
     assert.equal(st.auth.mode, "byok")
     assert.ok(!JSON.parse(JSON.stringify(st.auth)).zenKey.includes("zen-secret"), "key masked")
   })
@@ -1880,7 +1890,7 @@ describe("exhausted free verdict + BYOK escalation", () => {
           : jsonResponse({ model: m1, choices: [{ message: { role: "assistant", content: "saved" } }] })
       }],
     ])
-    const req = mockReq({ headers: { authorization: "Bearer own-key" }, _body: JSON.stringify({ model: m1, messages: [] }) })
+    const req = mockReq({ headers: { "x-zen-key": "own-key" }, _body: JSON.stringify({ model: m1, messages: [] }) })
     const res = mockRes()
     await zp.handleChat(req, res)
     assert.equal(res.state.status, 200)
@@ -1904,7 +1914,7 @@ describe("exhausted free verdict + BYOK escalation", () => {
         return jsonResponse({ error: { message: "FreeUsageLimitError" } }, 429)
       }],
     ])
-    const req = mockReq({ headers: { authorization: "Bearer own-key" }, _body: JSON.stringify({ model: m1, messages: [] }) })
+    const req = mockReq({ headers: { "x-zen-key": "own-key" }, _body: JSON.stringify({ model: m1, messages: [] }) })
     const res = mockRes()
     await zp.handleChat(req, res)
     assert.equal(res.state.status, 429)
@@ -1927,7 +1937,7 @@ describe("exhausted free verdict + BYOK escalation", () => {
     await zp.handleChat(req, res)
     assert.equal(res.state.status, 429)
     assert.match(res.body, /Free usage limit reached/)
-    for (const a of auths) assert.equal(a, "Bearer public")
+    for (const a of auths) assert.equal(a, "Bearer public", "upstream sees the anonymous tier")
   })
 
   test("the Anthropic loop escalates the same way", async () => {
@@ -1945,7 +1955,7 @@ describe("exhausted free verdict + BYOK escalation", () => {
       }],
     ])
     const req = mockReq({
-      headers: { authorization: "Bearer own-key" },
+      headers: { "x-zen-key": "own-key" },
       _body: JSON.stringify({ model: m1, max_tokens: 64, messages: [{ role: "user", content: "hey" }] }),
       url: "/v1/messages",
     })
@@ -2462,10 +2472,16 @@ describe("exactly one client key exists (regenerate, not accumulate)", () => {
   })
 })
 
-describe("bootstrap key for public binds (9router parity)", () => {
-  test("loopback with no credentials stays open — nothing minted", () => {
+describe("bootstrap key for every bind (9router parity)", () => {
+  test("loopback mints a client key too, but no dashboard password", () => {
     zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1" })
-    assert.equal(zp.ensureDefaultKey(), null)
+    const minted = zp.ensureDefaultKey()
+    assert.match(minted.key, zp.KEY_RE, "the dashboard always has a key to show and copy")
+    assert.equal(zp.config.apiKeys.length, 1)
+    assert.equal(minted.adminPassword, undefined, "a loopback dashboard stays open by design")
+    assert.equal(zp.config.adminPassword, "", "no password was minted")
+    assert.ok(zp.resolveApiKey(minted.key), "the minted key authenticates model calls")
+    assert.equal(zp.authForUpstream(mockReq({ _anonymous: true })), null, "anonymous requests refused")
   })
 
   test("public bind with no credentials mints one and auth turns on", () => {
@@ -2476,8 +2492,7 @@ describe("bootstrap key for public binds (9router parity)", () => {
     assert.equal(zp.config.apiKeys.length, 1, "stored hashed in the keys list")
     assert.equal(zp.config.apiKeys[0].name, "Default Key")
     assert.ok(zp.resolveApiKey(minted.key), "it authenticates model calls")
-    assert.equal(zp.authRequired(), true)
-    assert.equal(zp.authForUpstream(mockReq({})), null, "anonymous requests refused")
+    assert.equal(zp.authForUpstream(mockReq({ _anonymous: true })), null, "anonymous requests refused")
     assert.equal(zp.authForUpstream(mockReq({ headers: { authorization: `Bearer ${minted.key}` } })), "Bearer public")
   })
 
@@ -5253,9 +5268,11 @@ describe("client keys gate inference; the admin password only gates the UI", () 
     assert.deepEqual(zp.listApiKeys().find((k) => k.id === entry.id), undefined)
   })
 
-  test("x-api-key still works as a real Zen key when no key is required", () => {
-    zp.saveConfig({ apiKeys: [], adminPassword: "", defaultZenKey: "", host: "127.0.0.1" })
-    assert.equal(zp.authForUpstream(mockReq({ headers: { "x-api-key": "my-zen-key" } })), "Bearer my-zen-key")
+  test("x-api-key is a client-key header, never a forwarded Zen key", () => {
+    // A fresh key: an earlier test in this suite replaced the harness one.
+    const { key } = zp.createApiKey("header-check")
+    assert.equal(zp.authForUpstream(mockReq({ headers: { "x-api-key": "my-zen-key" } })), null)
+    assert.ok(zp.authForUpstream(mockReq({ headers: { "x-api-key": key } })), "the minted key works")
   })
 
   test("adminAuth accepts the admin password as either header, and nothing else", async () => {
@@ -5800,29 +5817,32 @@ describe("CRLF streams survive every chunk boundary (audit #8)", () => {
   })
 })
 
-describe("x-zen-key works without a client key (audit #9)", () => {
-  test("a per-request Zen key is honoured on an open proxy", () => {
-    zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1", defaultZenKey: "" })
+describe("x-zen-key: a per-request upstream key, behind the client key (audit #9)", () => {
+  test("a per-request Zen key is honoured", () => {
+    zp.saveConfig({ adminPassword: "", defaultZenKey: "" })
     assert.equal(zp.authForUpstream(mockReq({ headers: { "x-zen-key": "sk-custom" } })), "Bearer sk-custom")
   })
 
   test("a per-request Zen key outranks a configured default", () => {
-    zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1", defaultZenKey: "zen-default" })
+    zp.saveConfig({ adminPassword: "", defaultZenKey: "zen-default" })
     assert.equal(zp.authForUpstream(mockReq({ headers: { "x-zen-key": "sk-custom" } })), "Bearer sk-custom")
     assert.equal(zp.authForUpstream(mockReq()), "Bearer zen-default")
   })
 
   test("`public` is anonymous, not an override", () => {
-    zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1", defaultZenKey: "" })
+    zp.saveConfig({ adminPassword: "", defaultZenKey: "" })
     assert.equal(zp.authForUpstream(mockReq({ headers: { "x-zen-key": "public" } })), "Bearer public")
+  })
+
+  test("x-zen-key alone does not admit a caller without the client key", () => {
+    assert.equal(zp.authForUpstream(mockReq({ _anonymous: true, headers: { "x-zen-key": "sk-custom" } })), null)
   })
 })
 
-describe("the chat route retries a rejected placeholder key (audit #10)", () => {
-  test("a 401 for the caller's placeholder key falls back to the configured Zen key", async () => {
+describe("the proxy's own upstream credential is the only one that travels (audit #10)", () => {
+  test("a caller token is never forwarded, so upstream cannot reject it", async () => {
     zp.saveConfig({
       adminPassword: "",
-      apiKeys: [],
       host: "127.0.0.1",
       defaultZenKey: "zen-configured",
       fallbackModels: ["big-pickle"],
@@ -5844,14 +5864,12 @@ describe("the chat route retries a rejected placeholder key (audit #10)", () => 
         },
       ],
     ])
-    const req = mockReq({
-      headers: { authorization: "Bearer sk-placeholder" },
-      _body: JSON.stringify({ model: "big-pickle", messages: [] }),
-    })
+    // The client key is the proxy's credential; the caller's token is irrelevant.
+    const req = mockReq({ _body: JSON.stringify({ model: "big-pickle", messages: [] }) })
     const res = mockRes()
     await zp.handleChat(req, res)
     assert.equal(res.state.status, 200)
-    assert.deepEqual(auths, ["Bearer sk-placeholder", "Bearer zen-configured"], "one retry under the configured key")
+    assert.deepEqual(auths, ["Bearer zen-configured"], "upstream only ever sees the configured key")
   })
 
   test("a client key is never swapped for the fallback (it would leak)", async () => {

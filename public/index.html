@@ -267,6 +267,17 @@ label {
 }
 label::before { content:"▸ "; color:var(--coral) }
 .formgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:0 24px }
+/* Secret fields: masked until the eye is pressed. The button sits inside the
+   input's own box so the row keeps the same height as every other field. */
+.secret { position:relative }
+.secret input { padding-right:42px }
+.secret .eye {
+  position:absolute; right:6px; top:50%; transform:translateY(-50%);
+  background:transparent; border:0; box-shadow:none; padding:6px; border-radius:8px;
+  color:var(--ink2); cursor:pointer; line-height:0;
+}
+.secret .eye:hover, .secret .eye:active { transform:translateY(-50%); box-shadow:none; background:var(--paper2); color:var(--ink) }
+.secret .eye svg { width:17px; height:17px; display:block }
 textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:12.5px }
 .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap }
 .row .grow { flex:1 }
@@ -414,7 +425,11 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
           <label>Port</label><input id="cfgPort" type="number">
           <label>Upstream url</label><input id="cfgUpstream" type="text">
           <label>User-agent (the unlock)</label><input id="cfgUa" type="text">
-          <label>API key <span class="hint">(what your agent sends as its API key)</span></label><input id="cfgApiKey" type="text" readonly spellcheck="false">
+          <label>API key <span class="hint">(what your agent sends as its API key)</span></label>
+          <div class="secret">
+            <input id="cfgApiKey" type="password" readonly spellcheck="false" autocomplete="off">
+            <button type="button" class="eye" data-eye="cfgApiKey" title="Show / hide the key" aria-label="Show or hide the API key"></button>
+          </div>
           <div class="row" style="gap:8px;margin-top:2px">
             <button type="button" class="primary" onclick="copyApiKey()" style="font-size:11px;padding:6px 10px">Copy key</button>
             <span class="hint" id="apiKeyHint" style="min-height:16px"></span>
@@ -423,9 +438,16 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
         <div>
           <label>Default model <span class="hint">(empty = auto-pick healthy free model)</span></label><input id="cfgDefault" type="text">
           <label>Admin password (dashboard login; empty = open)</label>
-          <input id="cfgAdminPassword" type="text" autocomplete="new-password" spellcheck="false">
+          <div class="secret">
+            <input id="cfgAdminPassword" type="password" autocomplete="new-password" spellcheck="false">
+            <button type="button" class="eye" data-eye="cfgAdminPassword" title="Show / hide the password" aria-label="Show or hide the admin password"></button>
+          </div>
           <div class="hint" id="adminPwHint" style="min-height:16px;margin-top:4px"></div>
-          <label>Zen key (byok, optional)</label><input id="cfgZenKey" type="password" autocomplete="new-password">
+          <label>Zen key (byok, optional)</label>
+          <div class="secret">
+            <input id="cfgZenKey" type="password" autocomplete="new-password">
+            <button type="button" class="eye" data-eye="cfgZenKey" title="Show / hide the Zen key" aria-label="Show or hide the Zen key"></button>
+          </div>
           <div class="row" style="gap:8px;margin-top:2px">
             <button type="button" class="primary" onclick="testZenKey()" style="font-size:11px;padding:6px 10px">Test key</button>
             <span class="hint mono" id="cfgAuth"></span>
@@ -797,13 +819,11 @@ async function populateConfigForm() {
     const st = await api("/api/status")
     const auth = st.auth || {}
     const modeLabel =
-      auth.mode === "proxy+byok" ? "proxy key + your zen key"
-      : auth.mode === "byok" ? "your zen key"
-      : auth.mode === "proxy" ? "proxy key"
-      : "anonymous public"
+      auth.mode === "byok" ? "upstream: your zen key"
+      : "upstream: anonymous public"
     const eff = st.effectiveDefault ? " · auto→" + st.effectiveDefault : ""
     $("cfgDefault").placeholder = eff ? "auto → " + st.effectiveDefault : "(auto)"
-    $("cfgAuth").textContent = "auth: " + modeLabel + (auth.zenKey ? " (" + auth.zenKey + ")" : "") + eff
+    $("cfgAuth").textContent = "client key required · " + modeLabel + (auth.zenKey ? " (" + auth.zenKey + ")" : "") + eff
   } catch {}
 }
 
@@ -958,6 +978,36 @@ function jsStr(s) {
   return JSON.stringify(String(s ?? "")).replace(/'/g, "\\x27").replace(/&/g, "\\u0026")
 }
 
+// ---- secret fields: masked by default, eye toggles visibility -----------------
+// The key is masked on screen the way 9router and OpenRouter show one, so a
+// shared screen or a screen recording does not leak it. Copy still works while
+// masked — the clipboard gets the real value, not the dots.
+const EYE_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>'
+const EYE_SHUT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.5 18.5 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+
+function paintEye(btn, shown) {
+  btn.innerHTML = shown ? EYE_SHUT : EYE_OPEN
+  btn.setAttribute("aria-pressed", shown ? "true" : "false")
+}
+
+function initSecretFields() {
+  document.querySelectorAll(".secret .eye").forEach((btn) => {
+    const input = $(btn.dataset.eye)
+    if (!input) return
+    paintEye(btn, input.type === "text")
+    btn.addEventListener("click", () => {
+      const show = input.type === "password"
+      input.type = show ? "text" : "password"
+      paintEye(btn, show)
+      // Keep the caret where it was: toggling the type otherwise drops it.
+      const at = input.selectionEnd
+      input.focus()
+      try { input.setSelectionRange(at, at) } catch {}
+    })
+  })
+}
+initSecretFields()
+
 // ---- client API key (mirrors the Zen key field above it) ---------------------
 // One key exists at a time. This row only shows and copies it.
 let currentApiKey = ""
@@ -977,11 +1027,25 @@ async function loadApiKey() {
 
 function copyApiKey() {
   if (!currentApiKey) return toast("No API key to copy", "bad")
-  navigator.clipboard?.writeText(currentApiKey).then(() => toast("Key copied")).catch(() => {
+  // Reach for the clipboard API first; it needs a secure context, so a plain
+  // http://<lang-ip> dashboard has to fall back. A password-type input cannot be
+  // selected, so the fallback flips the type for the duration of the copy and
+  // puts the eye back the way it was.
+  const fallback = () => {
     const inp = $("cfgApiKey")
-    inp.removeAttribute("readonly"); inp.select(); document.execCommand("copy"); inp.setAttribute("readonly", "readonly")
+    const wasPassword = inp.type === "password"
+    if (wasPassword) inp.type = "text"
+    inp.removeAttribute("readonly")
+    inp.select()
+    try { document.execCommand("copy") } catch {}
+    inp.setAttribute("readonly", "readonly")
+    if (wasPassword) inp.type = "password"
+    window.getSelection()?.removeAllRanges()
     toast("Key copied")
-  })
+  }
+  const clip = navigator.clipboard?.writeText(currentApiKey)
+  if (!clip) return fallback()
+  clip.then(() => toast("Key copied")).catch(fallback)
 }
 
 async function refreshAll() {

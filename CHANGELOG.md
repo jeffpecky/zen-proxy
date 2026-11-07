@@ -8,6 +8,19 @@ for [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A client API key is now always required on model calls.** Every install
+  mints an `sk-…` key at first boot (loopback included) and prints it once;
+  Settings shows it masked under User-agent with an eye toggle and **Copy key**.
+  Without the key every `/v1/*` call is `401`. There is no anonymous path.
+- **`REQUIRE_API_KEY` / `requireApiKey` removed** — the key is unconditional, so
+  the switch had nothing left to control.
+- **The dashboard password (when set) and the Zen key are masked** behind an eye
+  toggle too; the key used to be plain text on screen.
+- `zen-claude` now puts the minted client key in `ANTHROPIC_AUTH_TOKEN` (read
+  from the config file) instead of the literal `public`.
+- The caller's own bearer token is never forwarded upstream any more; it only
+  ever carries the proxy's credential, so the 401-placeholder retry path is
+  gone.
 - **The source is split into modules.** `zen-proxy.mjs` was ~5,000 lines; it is
   now a 114-line entry point plus focused modules under `src/`. No behaviour
   change — the public surface the tests drive is re-exported from

@@ -100,16 +100,21 @@ server.listen(config.port, config.host, () => {
     } catch {}
   }
 
-  // A public bind with no credential would be an open relay (and the anonymous
-  // `public` tier is the only thing a stranger would need to drain it). Mint
-  // both secrets at boot and print them once — each is stored once, the
-  // password in the 0600 config file, the key only as a hash.
+  // Every install gets a client key at boot: it is what the dashboard shows and
+  // copies, and a loopback box that minted none would render an empty field.
+  // The admin password is minted only when the proxy is reachable off this
+  // machine — a loopback install already has an open dashboard by design.
   const minted = ensureDefaultKey()
   if (minted) {
-    log("no credentials configured and this proxy is reachable off this machine")
-    if (minted.adminPassword) log(`   dashboard password: ${minted.adminPassword}   (Settings → change it; this is the login only)`)
-    if (minted.key) log(`   client api key:     ${minted.key}   (ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY for model calls)`)
-    log("   they are separate: the password never calls models, the key never logs in")
+    if (minted.key) {
+      log("client api key minted — copy it from Settings, or use it directly:")
+      log(`   client api key:     ${minted.key}   (ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY for model calls)`)
+    }
+    if (minted.adminPassword) {
+      log("no dashboard password and this proxy is reachable off this machine")
+      log(`   dashboard password: ${minted.adminPassword}   (Settings → change it; this is the login only)`)
+    }
+    if (minted.key && minted.adminPassword) log("   they are separate: the password never calls models, the key never logs in")
   }
 
   startConfigWatch()

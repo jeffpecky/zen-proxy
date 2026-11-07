@@ -1,7 +1,7 @@
 // HTTP plumbing: the request body reader, JSON replies, client address
 // resolution, and credential extraction.
 import { createHash, timingSafeEqual } from "node:crypto"
-import { authRequired, resolveApiKey } from "./apikeys.mjs"
+import { resolveApiKey } from "./apikeys.mjs"
 import { MAX_BODY, config } from "./config.mjs"
 
 
@@ -115,20 +115,15 @@ function authForUpstream(req) {
   const key = apiKeyHeader(req)
   const override = zenKeyOverride(req)
 
-  // Any minted key authenticates the call. The dashboard password does not:
-  // it opens /api/* and nothing else.
-  const credential = incoming || key
-  const resolved = resolveApiKey(credential)
-  if (resolved) req._apiKey = resolved
-  const keyed = authRequired()
-  if (keyed && !resolved) return null
-  if (keyed) return override ?? (config.defaultZenKey ? `Bearer ${config.defaultZenKey}` : "Bearer public")
-
-  if (override) return override
-  if (incoming && !safeEqual(incoming, "public")) return `Bearer ${incoming}`
-  if (key && !safeEqual(key, "public")) return `Bearer ${key}`
-  if (config.defaultZenKey) return `Bearer ${config.defaultZenKey}`
-  return "Bearer public"
+  // A minted client key is required on every call. The dashboard password is
+  // not one: it opens /api/* and nothing else. A caller's own token is not one
+  // either — it is never forwarded, so it identifies nobody.
+  const resolved = resolveApiKey(incoming || key)
+  if (!resolved) return null
+  req._apiKey = resolved
+  // Upstream sees the proxy's credential: a per-request x-zen-key, the
+  // configured Zen key, or the anonymous tier.
+  return override ?? (config.defaultZenKey ? `Bearer ${config.defaultZenKey}` : "Bearer public")
 }
 
 export {

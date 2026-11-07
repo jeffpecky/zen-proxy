@@ -2,7 +2,7 @@
 // Generate a Claude Code settings file that points at a local zen-proxy and
 // fills the /model picker with every free Zen model the proxy currently serves.
 //
-//   node make-settings.mjs <port> <outPath>
+//   node make-settings.mjs <port> <outPath> [configPath]
 //
 // Claude Code keeps its own model catalog, so `zen-claude` would otherwise start
 // with a model the proxy cannot serve and no way to see the ones it can. Each
@@ -13,10 +13,32 @@ import fs from "node:fs"
 
 const port = Number(process.argv[2] || 8181)
 const outPath = process.argv[3]
+let configPath = process.argv[4] || process.env.ZEN_PROXY_CONFIG || ""
 if (!outPath) {
-  console.error("usage: make-settings.mjs <port> <outPath>")
+  console.error("usage: make-settings.mjs <port> <outPath> [configPath]")
   process.exit(2)
 }
+// The launcher may not have found a config; the proxy creates one beside
+// itself, so look there before giving up on the client key.
+if (!configPath) {
+  const guess = new URL("../zen-proxy.json", import.meta.url)
+  if (fs.existsSync(guess)) configPath = guess.pathname.replace(/^\/([A-Za-z]:)/, "$1")
+}
+
+// The caller's credential. A client key is required on every call, so `public`
+// would be a 401. Read it from the config file the launcher already resolved —
+// the plaintext is there so the dashboard can show and copy it.
+function loadToken() {
+  if (!configPath) return "public"
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"))
+    const key = cfg.apiKeys?.[0]?.key
+    return typeof key === "string" && key.startsWith("sk-") ? key : "public"
+  } catch {
+    return "public"
+  }
+}
+const token = loadToken()
 
 const BEHAVES_AS = "claude-sonnet-4-5"
 
@@ -46,7 +68,7 @@ const firstModel = models[0] ?? "space-bunny-free"
 const settings = {
   env: {
     ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
-    ANTHROPIC_AUTH_TOKEN: "public",
+    ANTHROPIC_AUTH_TOKEN: token,
     ANTHROPIC_MODEL: firstModel,
     // Claude Code sends its built-in haiku id for background work (titles,
     // quotas, summaries). Left unset, those requests name a model this proxy

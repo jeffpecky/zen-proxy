@@ -66,7 +66,7 @@ It starts the proxy if it is not already running, loads every live free Zen mode
 | Setting | Value |
 |---|---|
 | Base URL | `http://127.0.0.1:8181/v1` |
-| API key | `public` |
+| API key | the client key — printed at first boot, or Settings → **API key** (Copy key) |
 | Model | anything from `GET /v1/models` |
 
 Confirm the proxy is up:
@@ -99,7 +99,7 @@ It stays up until you stop it, so you point your agent at it once and keep using
 | `GET /v1/models` | What's live right now |
 | Automatic fallback | Retries the next free model on `429` / `5xx` / unavailable |
 | Model aliases | Call it `gpt-4o`, get a free model back |
-| Auth | Anonymous `Bearer public` on loopback; a minted `sk-…` key for model calls; the admin password for the dashboard |
+| Auth | A minted `sk-…` client key on every model call (no anonymous path); the admin password for the dashboard |
 | Dashboard | `http://127.0.0.1:8181/` |
 
 The free-model catalog in [`models.json`](models.json) is refreshed from OpenCode's public catalog by a GitHub Action every 6 hours.
@@ -172,8 +172,8 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 | `responsesModels` | `["gpt-5*","gpt-6*","grok-*","muse-spark-*"]` | Models served on `/v1/responses`; patterns may end in `*` |
 | `defaultZenKey` | `""` | Your own Zen key instead of anonymous `public`; a 429 that says the *identity's* free allowance is spent ("Free usage limit reached") retries that same attempt once under this key before walking the chain — the shared-bucket cooldown never escalates |
 | `adminPassword` | `""` (no default) | Dashboard login only (`ADMIN_PASSWORD`). Opens `/` and `/api/*`; **does not** authenticate model calls. Empty + loopback = open dashboard; empty + any other bind = generated at boot and printed once |
-| `apiKeys` | `[]` | Client keys (`sk-…`) that authenticate **model calls**. Shown in Settings under the Zen key, masked with Show / Copy, and replaced with **Regenerate** (`POST /api/keys`). Exactly one key exists at a time — regenerating invalidates the previous one immediately, so there is never a second credential nobody remembers to revoke. **Not** a dashboard login |
-| `requireApiKey` | `false` | Force auth even on a loopback bind behind a reverse proxy (`REQUIRE_API_KEY=1`) |
+| `apiKeys` | *(minted at first boot)* | Client keys (`sk-…`) that authenticate **model calls**. Shown in Settings under the User-agent as a masked field with Show / Copy. Exactly one key exists at a time — `POST /api/keys` regenerates it and invalidates the previous one immediately. **Required**: there is no anonymous path. **Not** a dashboard login |
+| `requireApiKey` | — | Removed. A client key is always required |
 | `rateLimitMax` / `rateLimitWindowMs` | `0` (off) / `60000` | Per-client rate limiting; local callers are split by user-agent family so several agents behind the same address do not share one budget |
 | `timeoutMs` / `cacheMs` | `120000` / `30000` | Upstream *silence* timeout (re-armed on every chunk, so long replies are not cut), `/v1/models` cache TTL |
 | `autoSync` / `autoSyncIntervalMs` | `true` / `3600000` | Runtime discovery of newly-offered free models |
@@ -188,15 +188,15 @@ For replies, one rule: a reply may only carry calls your agent can actually run.
 | | What it does | Where it lives |
 |---|---|---|
 | **Admin password** (`adminPassword`) | Logs into the dashboard and `/api/*`. Nothing else | `zen-proxy.json`, masked in the UI. Env: `ADMIN_PASSWORD` |
-| **Client key** (`sk-…` in `apiKeys`) | Authenticates model calls on `/v1/*`. Nothing else — it does **not** log into the dashboard | Hash only (SHA-256), shown once at mint |
+| **Client key** (`sk-…` in `apiKeys`) | Authenticates model calls on `/v1/*`. Nothing else — it does **not** log into the dashboard | Config (so Settings can show and copy it); auth compares the SHA-256 in constant time |
 
 A client key starts with `sk-` + 43 base64url chars (256 bits from the CSPRNG) and is minted at first boot on a public bind, or via `POST /api/keys`. Modelled on 9router's lifecycle, hardened for a public host: authentication always compares the SHA-256 in constant time — never the stored plaintext, which exists only so the dashboard can show and copy the key. Revoke with `DELETE /api/keys?id=…` (holders get `401` immediately). 
 
-On a non-loopback bind with neither credential set, **both are generated at boot and printed once** — the password for the UI, a key for your agents.
+On first boot a client key is **always** generated and printed once (the dashboard shows it under User-agent). On a non-loopback bind with no password set, a dashboard password is generated too and printed once. Use the key in `ANTHROPIC_AUTH_TOKEN` / `OPENAI_API_KEY`; use the password to log in.
 
 
 
-Anonymous `public` access shares a per-IP quota that is sometimes saturated. Set `defaultZenKey`, or send `x-zen-key` per request, for steadier service.
+Upstream still calls the anonymous `public` tier by default, which shares a per-IP quota that is sometimes saturated. Set `defaultZenKey`, or send `x-zen-key` per request, for steadier service.
 </details>
 
 <details>

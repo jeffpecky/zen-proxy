@@ -71,7 +71,7 @@ describe("launcher settings", () => {
   test("the static fallback points at the proxy with a model pinned", () => {
     const cfg = JSON.parse(fs.readFileSync(SETTINGS, "utf8"))
     assert.equal(cfg.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8181")
-    assert.equal(cfg.env.ANTHROPIC_AUTH_TOKEN, "public")
+    assert.match(cfg.env.ANTHROPIC_AUTH_TOKEN, /^sk-/, "a client key placeholder, not `public`")
     assert.ok(cfg.env.ANTHROPIC_MODEL)
   })
 
@@ -144,8 +144,22 @@ describe("model picker generation", () => {
     }
   })
 
-  test("it falls back to the shipped catalog when the proxy is unreachable", () => {
+  test("it fills ANTHROPIC_AUTH_TOKEN from the proxy's minted client key", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-picker-"))
+    const out = path.join(dir, "settings.json")
+    const cfgPath = path.join(dir, "zen-proxy.json")
+    const key = "sk-" + "A".repeat(43)
+    fs.writeFileSync(cfgPath, JSON.stringify({ port: 1, apiKeys: [{ id: "x", key, hash: "h" }] }))
+    try {
+      execFileSync("node", [MAKER, "1", out, cfgPath], { encoding: "utf8" })
+      const cfg = JSON.parse(fs.readFileSync(out, "utf8"))
+      assert.equal(cfg.env.ANTHROPIC_AUTH_TOKEN, key, "Claude Code presents the client key, not `public`")
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("it falls back to the shipped catalog when the proxy is unreachable", () => {    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zen-picker-"))
     const out = path.join(dir, "settings.json")
     try {
       const n = Number(execFileSync("node", [MAKER, "1", out], { encoding: "utf8" }).trim())

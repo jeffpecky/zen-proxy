@@ -75,9 +75,6 @@ const DEFAULT_CONFIG = {
   // Minted per-caller keys (see src/apikeys.mjs). Only the SHA-256 of each key
   // is stored, so a leaked config file carries no usable credential.
   apiKeys: [],
-  // Force auth even on loopback with nothing configured — for a deploy behind a
-  // reverse proxy, where config.host is still 127.0.0.1.
-  requireApiKey: ENV.REQUIRE_API_KEY === "1",
   defaultZenKey: ENV.ZEN_KEY ?? "",
   // Egress list. Empty = direct. More than one is what makes the 429 rotation
   // mean something: a fresh socket to the same IP is the same quota bucket, so

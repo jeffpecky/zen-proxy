@@ -53,12 +53,9 @@ async function handleMessages(req, res) {
     const e = anthropicError(401, { error: { type: "authentication_error", message: "invalid proxy key" } })
     return json(res, e.status, e.body)
   }
-  // An Anthropic client always sends some token (Claude Code uses whatever
-  // ANTHROPIC_AUTH_TOKEN holds, which for a local proxy is usually a placeholder).
-  // If upstream rejects it, fall back to the configured key or the anonymous tier
-  // rather than failing the request outright.
-  const fallbackAuth = config.apiKeys.length || config.adminPassword ? null : config.defaultZenKey ? `Bearer ${config.defaultZenKey}` : "Bearer public"
-  let triedFallback = false
+  // Upstream never sees a caller-supplied token: authForUpstream() always
+  // resolves the configured Zen key or the anonymous tier, so there is no
+  // placeholder for upstream to reject and nothing to fall back from.
   let triedByok = false
   let rotated429 = false
 
@@ -122,13 +119,6 @@ async function handleMessages(req, res) {
         }
         recordObserved(model, false)
         break
-      }
-
-      if (upstreamRes.status === 401 && !triedFallback && fallbackAuth && fallbackAuth !== auth) {
-        triedFallback = true
-        auth = fallbackAuth
-        attempt--
-        continue
       }
 
       if (upstreamRes.ok) {
@@ -290,12 +280,8 @@ async function handleChat(req, res, responsesRoute = false) {
     recordReq(req, requested, Date.now() - start, 401)
     return json(res, 401, { error: { type: "invalid_request_error", message: "invalid proxy key" } })
   }
-  // Mirrors handleMessages: OpenAI-shaped clients usually send a placeholder
-  // key (OPENAI_API_KEY=sk-local, or whatever the SDK defaults to), and a
-  // configured proxy must not fail just because upstream rejects that string.
-  // Only applied when no client key is required, so a proxy credential can never leak.
-  const fallbackAuth = config.apiKeys.length || config.adminPassword ? null : config.defaultZenKey ? `Bearer ${config.defaultZenKey}` : "Bearer public"
-  let triedFallback = false
+  // Same as handleMessages: the credential upstream sees is the proxy's own
+  // choice, never the caller's token.
   let triedByok = false
   let rotated429 = false
   let lastErr = null
@@ -406,13 +392,6 @@ async function handleChat(req, res, responsesRoute = false) {
         }
         recordObserved(model, false)
         break
-      }
-
-      if (upstreamRes.status === 401 && !triedFallback && fallbackAuth && fallbackAuth !== auth) {
-        triedFallback = true
-        auth = fallbackAuth
-        attempt--
-        continue
       }
 
       if (upstreamRes.ok) {
