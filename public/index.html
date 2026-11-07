@@ -269,6 +269,10 @@ label::before { content:"▸ "; color:var(--coral) }
 .formgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:0 24px }
 textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:12.5px }
 .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap }
+.keyrow { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 0; border-bottom:1px dashed rgba(0,0,0,.12) }
+.keyrow:last-child { border-bottom:0 }
+.keymeta { display:flex; flex-direction:column; min-width:120px; gap:2px }
+.keyval { flex:1; min-width:180px; overflow-wrap:anywhere; word-break:break-all }
 .row .grow { flex:1 }
 .checkbox { display:flex; align-items:center; gap:10px; margin-top:18px }
 .checkbox input { width:auto; accent-color:var(--coral) }
@@ -426,10 +430,9 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
             <span class="hint mono" id="cfgAuth"></span>
             <span class="hint" id="zenKeyHint" style="min-height:16px"></span>
           </div>
-          <label>Client API key <span class="hint">(what your agent sends as its API key)</span></label>
-          <input id="cfgApiKey" type="text" readonly spellcheck="false" placeholder="no key yet — one is minted at boot or by Mint">
+          <label>Client API keys <span class="hint">(what your agent sends as its API key)</span></label>
+          <div id="apiKeyList"></div>
           <div class="row" style="gap:8px;margin-top:2px">
-            <button type="button" class="primary" onclick="copyApiKey()" style="font-size:11px;padding:6px 10px">Copy key</button>
             <button type="button" onclick="mintApiKey()" style="font-size:11px;padding:6px 10px">Mint new</button>
             <span class="hint" id="apiKeyHint" style="min-height:16px"></span>
           </div>
@@ -960,49 +963,85 @@ function jsStr(s) {
   return JSON.stringify(String(s ?? "")).replace(/'/g, "\\x27").replace(/&/g, "\\u0026")
 }
 
-// ---- client API key (the one an agent sends) ---------------------------------
-// Shown here so it can be copied like the Zen key above. Stored plaintext for
-// display only; requests authenticate against the SHA-256.
-let currentApiKey = ""
+// ---- client API keys --------------------------------------------------------
+// 9router's shape: every key listed, masked, with Show / Copy / Revoke per row.
+// Keys minted before plaintext storage only have a hash and are marked as such.
+let keyList = []
 
 async function loadApiKey() {
   try {
     const data = await api("/api/keys")
-    const keys = data.keys || []
-    // A key minted before plaintexts were stored only has a hash: it works, but
-    // nobody can read it back, so the field must not claim there is no key.
-    const shown = keys.find((k) => k.key)
-    currentApiKey = shown?.key || ""
-    $("cfgApiKey").value = currentApiKey
-    const unreadable = keys.filter((k) => !k.key).length
-    if (currentApiKey) {
-      $("apiKeyHint").textContent = keys.length > 1 ? `${keys.length} keys exist — showing the first` : ""
-    } else if (unreadable) {
-      $("apiKeyHint").textContent =
-        `${unreadable} key${unreadable > 1 ? "s" : ""} minted before keys were readable here — it still works, but only its hash is stored. Mint a new one to get a copyable key.`
-    } else {
-      $("apiKeyHint").textContent = "no key yet — one is minted at boot on a public bind"
-    }
+    keyList = data.keys || []
+    renderApiKeys()
   } catch { /* unauthorized routes to showAuth */ }
 }
 
-function copyApiKey() {
-  if (!currentApiKey) return toast("No key to copy", "bad")
-  navigator.clipboard?.writeText(currentApiKey).then(() => toast("Key copied")).catch(() => {
-    const r = document.createRange(); r.selectNodeContents($("cfgApiKey"))
-    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r)
-    document.execCommand("copy"); toast("Key copied")
+function maskSk(k) {
+  if (!k) return ""
+  if (k.length <= 14) return "••••••••"
+  return k.slice(0, 6) + "••••••••••••" + k.slice(-4)
+}
+
+function renderApiKeys() {
+  const box = $("apiKeyList")
+  if (!keyList.length) {
+    box.innerHTML = `<div class="hint">no key yet — one is minted at boot on a public bind</div>`
+  } else {
+    box.innerHTML = keyList.map((k) => {
+      const shown = revealed.has(k.id)
+      const label = k.name ? escapeHtml(k.name) : `<code>${escapeAttr(k.id)}</code>`
+      const value = k.key ? (shown ? k.key : maskSk(k.key)) : "hash-only key — not readable, mint a new one"
+      return `<div class="keyrow">
+        <div class="keymeta"><span>${label}</span><span class="hint">${k.createdAt ? new Date(k.createdAt).toLocaleDateString() : ""}${k.lastUsedAt ? " · used " + new Date(k.lastUsedAt).toLocaleDateString() : ""}</span></div>
+        <code class="keyval mono" title="${shown ? "Hide" : "Show"}">${escapeHtml(value)}</code>
+        <div class="row" style="gap:6px">
+          ${k.key ? `<button onclick="toggleKey('${escapeAttr(k.id)}')">${shown ? "Hide" : "Show"}</button>
+          <button onclick="copyKey('${escapeAttr(k.id)}')">Copy</button>` : ""}
+          <button onclick="revokeKey('${escapeAttr(k.id)}')">Revoke</button>
+        </div>
+      </div>`
+    }).join("")
+  }
+  $("apiKeyHint").textContent = keyList.length > 1 ? `${keyList.length} keys — any of them works` : ""
+}
+
+const revealed = new Set()
+
+function toggleKey(id) {
+  revealed.has(id) ? revealed.delete(id) : revealed.add(id)
+  renderApiKeys()
+}
+
+function copyKey(id) {
+  const k = keyList.find((x) => x.id === id)
+  if (!k?.key) return toast("Nothing to copy", "bad")
+  navigator.clipboard?.writeText(k.key).then(() => toast("Key copied")).catch(() => {
+    const ta = document.createElement("textarea")
+    ta.value = k.key; document.body.appendChild(ta); ta.select()
+    document.execCommand("copy"); ta.remove(); toast("Key copied")
   })
 }
 
 async function mintApiKey() {
-  // Keeps the old key: callers already configured with it stay working.
+  // Keeps existing keys: callers already configured with them keep working.
   try {
-    await api("/api/keys", { method: "POST", body: JSON.stringify({ name: "dashboard " + new Date().toISOString().slice(0, 10) }) })
+    await api("/api/keys", { method: "POST", body: JSON.stringify({ name: "key " + new Date().toISOString().slice(0, 10) }) })
     await loadApiKey()
     toast("New key minted — copy it now")
   } catch (e) {
     if (e.message !== "unauthorized") toast("Mint failed: " + e.message, "bad")
+  }
+}
+
+async function revokeKey(id) {
+  if (!confirm("Revoke this key? Callers holding it get 401 immediately.")) return
+  try {
+    await api(`/api/keys?id=${encodeURIComponent(id)}`, { method: "DELETE" })
+    revealed.delete(id)
+    await loadApiKey()
+    toast("Key revoked")
+  } catch (e) {
+    if (e.message !== "unauthorized") toast("Revoke failed: " + e.message, "bad")
   }
 }
 
