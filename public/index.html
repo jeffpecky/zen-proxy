@@ -968,11 +968,21 @@ let currentApiKey = ""
 async function loadApiKey() {
   try {
     const data = await api("/api/keys")
-    currentApiKey = (data.keys || [])[0]?.key || ""
+    const keys = data.keys || []
+    // A key minted before plaintexts were stored only has a hash: it works, but
+    // nobody can read it back, so the field must not claim there is no key.
+    const shown = keys.find((k) => k.key)
+    currentApiKey = shown?.key || ""
     $("cfgApiKey").value = currentApiKey
-    $("apiKeyHint").textContent = currentApiKey
-      ? (data.keys.length > 1 ? `${data.keys.length} keys exist — showing the first` : "")
-      : "no key yet — one is minted at boot on a public bind"
+    const unreadable = keys.filter((k) => !k.key).length
+    if (currentApiKey) {
+      $("apiKeyHint").textContent = keys.length > 1 ? `${keys.length} keys exist — showing the first` : ""
+    } else if (unreadable) {
+      $("apiKeyHint").textContent =
+        `${unreadable} key${unreadable > 1 ? "s" : ""} minted before keys were readable here — it still works, but only its hash is stored. Mint a new one to get a copyable key.`
+    } else {
+      $("apiKeyHint").textContent = "no key yet — one is minted at boot on a public bind"
+    }
   } catch { /* unauthorized routes to showAuth */ }
 }
 
