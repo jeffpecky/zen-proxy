@@ -2472,7 +2472,7 @@ describe("exactly one client key exists (regenerate, not accumulate)", () => {
   })
 })
 
-describe("bootstrap key for every bind (9router parity)", () => {
+describe("bootstrap key for every bind (minted at boot, unlike 9router's lazy mint)", () => {
   test("loopback mints a client key too, but no dashboard password", () => {
     zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1" })
     const minted = zp.ensureDefaultKey()

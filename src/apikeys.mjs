@@ -121,8 +121,14 @@ export function dashboardAuthRequired() {
 }
 
 /**
- * Provision the credentials a first-time install needs, the way 9router
- * auto-provisions a "Default Key" so the endpoint works out of the box.
+ * Provision the credentials a first-time install needs, so the endpoint works
+ * out of the box the way 9router's auto-provisioned "Default Key" does.
+ *
+ * One deliberate difference from 9router: it mints LAZILY, when the dashboard's
+ * Endpoint page finds no keys (EndpointPageClient.js:259-271). This mints at
+ * boot, because `zen-claude` starts the proxy and calls it immediately with no
+ * dashboard visit in between — a lazy mint would leave that path with nothing
+ * to present.
  *
  * Two DIFFERENT secrets, because they answer two different questions:
  *   - `adminPassword` opens the dashboard and `/api/*` (9router's role: a
