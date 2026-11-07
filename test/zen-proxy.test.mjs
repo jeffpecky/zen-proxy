@@ -48,6 +48,8 @@ const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url))
 // Every model call needs a client key now, so the harness holds one and
 // mockReq() presents it unless a test supplies its own credential.
 let TEST_KEY = ""
+// The dashboard password the config ships with (9router's INITIAL_PASSWORD).
+const TEST_PASSWORD = "123456"
 // Git Bash (Windows) mangles backslash paths; forward slashes work everywhere
 const toPosix = (p) => p.replace(/\\/g, "/")
 
@@ -55,11 +57,21 @@ const toPosix = (p) => p.replace(/\\/g, "/")
 
 function mockReq(over = {}) {
   const body = over._body ?? ""
-  // A client key is required on every model call, so an unauthenticated mock
-  // request is a 401 by definition. Tests that exercise auth pass their own
-  // header explicitly; everything else rides the harness key.
+  // Every request carries a credential, and which one depends on the route —
+  // that split is the point of the design, so the harness respects it rather
+  // than papering over it:
+  //   /api/*  -> the dashboard password (the config ships `123456`)
+  //   model   -> the client key
+  // Tests that exercise auth pass their own header or set `_anonymous`.
+  const url = over.url ?? "/v1/chat/completions"
   const headers = { ...(over.headers ?? {}) }
-  if (TEST_KEY && !over._anonymous && !headers.authorization && !headers["x-api-key"]) headers.authorization = `Bearer ${TEST_KEY}`
+  if (!over._anonymous && !headers.authorization && !headers["x-api-key"]) {
+    // `_admin` covers the tests that call an /api/* handler directly, where the
+    // request never went through the router and so carries no /api/ url.
+    const admin = over._admin || url.startsWith("/api/")
+    const cred = admin ? TEST_PASSWORD : TEST_KEY
+    if (cred) headers.authorization = `Bearer ${cred}`
+  }
   return {
     socket: { remoteAddress: over.remoteAddress ?? "127.0.0.1" },
     method: over.method ?? "POST",
@@ -81,8 +93,13 @@ function mockReq(over = {}) {
 // (mid-stream rejection) rather than full-buffer-then-check.
 function mockStreamingReq(chunks, over = {}) {
   const pulled = { count: 0, finished: false }
+  const headers = { ...(over.headers ?? {}) }
+  if (!over._anonymous && !headers.authorization && !headers["x-api-key"]) {
+    const cred = over._admin ? TEST_PASSWORD : TEST_KEY
+    if (cred) headers.authorization = `Bearer ${cred}`
+  }
   return {
-    headers: over.headers ?? {},
+    headers,
     socket: { remoteAddress: over.remoteAddress ?? "127.0.0.1" },
     method: over.method ?? "POST",
     url: over.url ?? "/v1/chat/completions",
@@ -98,6 +115,8 @@ function mockStreamingReq(chunks, over = {}) {
       pulled.finished = true
     },
     ...over,
+    // After the spread: `over.headers` would otherwise drop the injected key.
+    headers,
   }
 }
 
@@ -924,14 +943,14 @@ describe("auth visibility & key test", () => {
     zp.saveConfig({ defaultZenKey: "", adminPassword: "" })
     globalThis.fetch = routeFetch([["/models", jsonResponse({ data: [] })]])
     let res = mockRes()
-    await zp.handleStatus(mockReq(), res)
+    await zp.handleStatus(mockReq({ url: "/api/status" }), res)
     let st = JSON.parse(res.body)
     assert.equal(st.auth.mode, "public", "upstream sees the anonymous tier")
 
     zp.saveConfig({ defaultZenKey: "zen-secret-key-123", adminPassword: "" })
     globalThis.fetch = routeFetch([["/models", jsonResponse({ data: [] })]])
     res = mockRes()
-    await zp.handleStatus(mockReq(), res)
+    await zp.handleStatus(mockReq({ url: "/api/status" }), res)
     st = JSON.parse(res.body)
     assert.equal(st.auth.mode, "byok")
     assert.ok(!JSON.parse(JSON.stringify(st.auth)).zenKey.includes("zen-secret"), "key masked")
@@ -951,7 +970,7 @@ describe("auth visibility & key test", () => {
         },
       ],
     ])
-    const req = mockReq({ _body: JSON.stringify({ model: m, zenKey: "sk-custom-zen-key" }) })
+    const req = mockReq({ _admin: true, _body: JSON.stringify({ model: m, zenKey: "sk-custom-zen-key" }) })
     const res = mockRes()
     await zp.handleTest(req, res)
     assert.equal(res.state.status, 200)
@@ -1402,7 +1421,7 @@ describe("test endpoint honest reporting", () => {
       ["/responses", () => jsonResponse({ error: { type: "FreeTierError", message: "free tier can only" } }, 403)],
     ])
     const res = mockRes()
-    await zp.handleTest(mockReq({ _body: JSON.stringify({ model: m }) }), res)
+    await zp.handleTest(mockReq({ url: "/api/test", _body: JSON.stringify({ model: m }) }), res)
     assert.equal(res.state.status, 200)
     const data = JSON.parse(res.body)
     assert.equal(data.gated, true, "flagged as gated")
@@ -1418,7 +1437,7 @@ describe("test endpoint honest reporting", () => {
       ["/responses", () => jsonResponse({ error: { type: "RegionError", message: "nope" } }, 403)],
     ])
     const res = mockRes()
-    await zp.handleTest(mockReq({ _body: JSON.stringify({ model: m }) }), res)
+    await zp.handleTest(mockReq({ url: "/api/test", _body: JSON.stringify({ model: m }) }), res)
     const data = JSON.parse(res.body)
     assert.equal(data.gated, false)
     assert.equal(data.ok, false)
@@ -1431,7 +1450,7 @@ describe("handleTest body size", () => {
     zp.saveConfig({ maxBodyBytes: 1024 * 1024 })
     const chunk = "x".repeat(100 * 1024)
     const chunks = Array.from({ length: 20 }, () => chunk)
-    const req = mockStreamingReq(chunks, { method: "POST" })
+    const req = mockStreamingReq(chunks, { _admin: true, method: "POST" })
     const res = mockRes()
     await zp.handleTest(req, res)
     assert.equal(res.state.status, 413)
@@ -1479,7 +1498,7 @@ describe("recordReq stats", () => {
   })
 
   test("handleStatus reports recent windows", async () => {
-    const req = mockReq()
+    const req = mockReq({ url: "/api/status" })
     zp.recordReq(req, "m", 1, 200, Date.now() - 30_000)
     globalThis.fetch = routeFetch([["/models", jsonResponse({ data: [] })]])
     const res = mockRes()
@@ -1491,7 +1510,7 @@ describe("recordReq stats", () => {
   })
 
   test("recent entries carry the real latency, not NaN", async () => {
-    const req = mockReq()
+    const req = mockReq({ url: "/api/status" })
     zp.recordReq(req, "m", 42, 200, Date.now() - 30_000)
     globalThis.fetch = routeFetch([["/models", jsonResponse({ data: [] })]])
     const res = mockRes()
@@ -2240,7 +2259,7 @@ describe("handleApiConfig", () => {
   test("GET returns the admin password but masks the Zen key", async () => {
     zp.saveConfig({ adminPassword: "secret-admin", defaultZenKey: "zen-abcdefghijklmnop" })
     const res = mockRes()
-    await zp.handleApiConfig(mockReq({ method: "GET", headers: { authorization: "Bearer secret-admin" } }), res)
+    await zp.handleApiConfig(mockReq({ method: "GET", url: "/api/config", headers: { authorization: "Bearer secret-admin" } }), res)
     const data = JSON.parse(res.body)
     // Behind adminAuth, so the caller already knows it — and it is the only
     // readable copy of a boot-generated password.
@@ -2250,7 +2269,7 @@ describe("handleApiConfig", () => {
 
   test("PUT ignores unknown keys", async () => {
     const before = zp.config.port
-    const req = mockReq({ method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify({ notAKey: "x", port: before }) })
+    const req = mockReq({ _admin: true, method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify({ notAKey: "x", port: before }) })
     const res = mockRes()
     await zp.handleApiConfig(req, res)
     assert.equal(zp.config.notAKey, undefined)
@@ -2289,14 +2308,14 @@ describe("handleApiConfig", () => {
   })
 
   test('PUT autoSync "0" → false', async () => {
-    const req = mockReq({ method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify({ autoSync: "0", port: zp.config.port }) })
+    const req = mockReq({ _admin: true, method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify({ autoSync: "0", port: zp.config.port }) })
     const res = mockRes()
     await zp.handleApiConfig(req, res)
     assert.equal(zp.config.autoSync, false)
   })
 
   test('PUT trustForwarded "true" → true', async () => {
-    const req = mockReq({ method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify({ trustForwarded: "true", port: zp.config.port }) })
+    const req = mockReq({ _admin: true, method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify({ trustForwarded: "true", port: zp.config.port }) })
     const res = mockRes()
     await zp.handleApiConfig(req, res)
     assert.equal(zp.config.trustForwarded, true)
@@ -2304,14 +2323,14 @@ describe("handleApiConfig", () => {
 
   test("PUT invalid port keeps existing port", async () => {
     const before = zp.config.port
-    const req = mockReq({ method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify({ port: "abc" }) })
+    const req = mockReq({ _admin: true, method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify({ port: "abc" }) })
     const res = mockRes()
     await zp.handleApiConfig(req, res)
     assert.equal(zp.config.port, before)
   })
 
   test("PUT with non-object body → 400", async () => {
-    const req = mockReq({ method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify([1]) })
+    const req = mockReq({ _admin: true, method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify([1]) })
     const res = mockRes()
     await zp.handleApiConfig(req, res)
     assert.equal(res.state.status, 400)
@@ -2321,7 +2340,7 @@ describe("handleApiConfig", () => {
     zp.saveConfig({ maxBodyBytes: 1024 * 1024 })
     const chunk = "x".repeat(100 * 1024)
     const chunks = Array.from({ length: 20 }, () => chunk) // ~2MB, no admin password set so adminAuth passes on loopback
-    const req = mockStreamingReq(chunks, { method: "PUT", headers: { "content-type": "application/json" } })
+    const req = mockStreamingReq(chunks, { _admin: true, method: "PUT", headers: { "content-type": "application/json" } })
     const res = mockRes()
     await zp.handleApiConfig(req, res)
     assert.equal(res.state.status, 413)
@@ -2473,15 +2492,41 @@ describe("exactly one client key exists (regenerate, not accumulate)", () => {
 })
 
 describe("bootstrap key for every bind (minted at boot, unlike 9router's lazy mint)", () => {
-  test("loopback mints a client key too, but no dashboard password", () => {
-    zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1" })
+  test("loopback mints a client key and keeps the shipped password", () => {
+    zp.saveConfig({ adminPassword: "123456", apiKeys: [], host: "127.0.0.1" })
     const minted = zp.ensureDefaultKey()
     assert.match(minted.key, zp.KEY_RE, "the dashboard always has a key to show and copy")
     assert.equal(zp.config.apiKeys.length, 1)
-    assert.equal(minted.adminPassword, undefined, "a loopback dashboard stays open by design")
-    assert.equal(zp.config.adminPassword, "", "no password was minted")
+    assert.equal(minted.adminPassword, undefined, "the default password is left alone on loopback")
+    assert.equal(zp.config.adminPassword, "123456", "9router's INITIAL_PASSWORD default")
     assert.ok(zp.resolveApiKey(minted.key), "the minted key authenticates model calls")
     assert.equal(zp.authForUpstream(mockReq({ _anonymous: true })), null, "anonymous requests refused")
+  })
+
+  test("a non-loopback bind replaces the known default password", () => {
+    // `123456` is printed in the README, so it must never guard a published
+    // dashboard. This is the 9router rule: the default works locally, and a
+    // public bind forces a real one.
+    zp.saveConfig({ adminPassword: "123456", apiKeys: [], host: "0.0.0.0" })
+    const minted = zp.ensureDefaultKey()
+    assert.ok(minted.adminPassword, "a random password was minted")
+    assert.notEqual(minted.adminPassword, "123456")
+    assert.equal(minted.replacedDefault, true, "the boot log says the default was replaced")
+    assert.equal(zp.config.adminPassword, minted.adminPassword)
+    // And it is what actually logs in.
+    assert.equal(zp.dashboardAuthRequired(), true)
+  })
+
+  test("an operator-chosen password survives a public bind", () => {
+    zp.saveConfig({ adminPassword: "my-own-password", apiKeys: [], host: "0.0.0.0" })
+    const minted = zp.ensureDefaultKey()
+    assert.equal(minted.adminPassword, undefined, "nothing to replace")
+    assert.equal(zp.config.adminPassword, "my-own-password")
+  })
+
+  test("clearing the password is how the login is turned off", () => {
+    zp.saveConfig({ adminPassword: "", apiKeys: [], host: "127.0.0.1" })
+    assert.equal(zp.dashboardAuthRequired(), false, "an empty password means an open loopback dashboard")
   })
 
   test("public bind with no credentials mints one and auth turns on", () => {
@@ -5956,7 +6001,7 @@ describe("a dashboard save only pins the catalog when it changed (audit #16)", (
   const put = async (body) => {
     const res = mockRes()
     await zp.handleApiConfig(
-      mockReq({ method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify(body) }),
+      mockReq({ _admin: true, method: "PUT", headers: { "content-type": "application/json" }, _body: JSON.stringify(body) }),
       res,
     )
     return res
@@ -6159,7 +6204,7 @@ describe("/api/test reports the caller the request path reports (audit #32)", ()
       ],
     ])
     const res = mockRes()
-    await zp.handleTest(mockReq({ headers: { "x-forwarded-for": "8.8.4.4" }, _body: JSON.stringify({ model: "big-pickle" }) }), res)
+    await zp.handleTest(mockReq({ url: "/api/test", headers: { "x-forwarded-for": "8.8.4.4" }, _body: JSON.stringify({ model: "big-pickle" }) }), res)
     assert.equal(realIp, "8.8.4.4", "TEST must honour trustForwarded like the request path")
   })
 })
@@ -6299,5 +6344,24 @@ describe("fingerprint tools match 9router's rules (read/shell are gate-load-bear
     assert.equal(zp.fingerprintToolKey("shell"), "shell")
     assert.equal(zp.fingerprintToolKey("Read"), "", "Claude Code's capitalised name is a caller tool, not a fingerprint")
     assert.equal(zp.fingerprintToolKey("grep"), "")
+  })
+})
+
+describe("a failed request never downgrades the TLS transport (regression)", () => {
+  // Measured: a transient wreq timeout used to be caught by upstreamFetch, which
+  // replayed the request over Node's TLS and logged "TLS transport unavailable".
+  // Node's ClientHello is exactly what the free tier 429s, so one slow request
+  // became a permanent 429 verdict with the real error hidden behind a message
+  // about a missing addon.
+  test("a per-request failure propagates instead of falling back to native fetch", async () => {
+    const src = fs.readFileSync(new URL("../src/tls.mjs", import.meta.url), "utf8")
+    const body = src.slice(src.indexOf("async function upstreamFetch"), src.indexOf("export {"))
+    assert.match(body, /tlsSessionGet\(proxyUrl\)/, "the fallback is gated on getting a session")
+    assert.doesNotMatch(
+      body,
+      /try\s*\{\s*return await tlsFetch/,
+      "the request itself must not sit inside the fallback's try block",
+    )
+    assert.match(body, /return sessionFetch\(session, url, init\)/, "the request goes through the session directly")
   })
 })

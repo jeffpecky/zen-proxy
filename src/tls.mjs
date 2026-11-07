@@ -4,7 +4,6 @@ import { createRequire } from "node:module"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { config } from "./config.mjs"
-import { log } from "./log.mjs"
 import { ENV } from "./util.mjs"
 
 const __dirname = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../")
@@ -81,7 +80,7 @@ async function loadWreq() {
           return await import(pathToFileURL(createRequire(base).resolve("wreq-js")).href)
         } catch {}
       }
-      throw new Error(`wreq-js not found — npm i wreq-js (or set ZEN_PROXY_WREQ), or ZEN_TLS=0 to run on node's TLS`)
+      throw new Error(`wreq-js not found — npm i wreq-js, or set ZEN_PROXY_WREQ to the module's path`)
     })().catch((err) => {
       wreqPromise = null
       throw err
@@ -100,8 +99,6 @@ const DIRECT_KEY = "direct"
 const MAX_TLS_SESSIONS = 32
 
 const tlsSessions = new Map()
-
-let tlsWarned = false
 
 
 function proxyKey(proxyUrl) {
@@ -206,6 +203,12 @@ function resetTlsSession(proxyUrl) {
 
 async function tlsFetch(url, init = {}, proxyUrl = null) {
   const session = await tlsSessionGet(proxyUrl)
+  return sessionFetch(session, url, init)
+}
+
+// The part of tlsFetch that can fail per request. Split out so upstreamFetch
+// can tell "no session" (transport unavailable) from "this request failed".
+async function sessionFetch(session, url, init = {}) {
   const { signal, timeout, ...rest } = init
   const res = await session.fetch(url, {
     ...rest,
@@ -229,27 +232,18 @@ async function tlsFetch(url, init = {}, proxyUrl = null) {
 let lastProxyUrl = null
 
 async function upstreamFetch(url, init = {}) {
+  // ZEN_TLS=0 is a test-only escape hatch: the suite stubs globalThis.fetch and
+  // the wreq transport would bypass the stub.
   if (!TLS_ENABLED) return fetch(url, init)
   const proxyUrl = pickProxy()
   lastProxyUrl = proxyUrl
-  try {
-    return await tlsFetch(url, init, proxyUrl)
-  } catch (err) {
-    // strictProxy semantics, as 9router's proxyFetch has them: a proxy that was
-    // *intended* but failed must not be replayed over the real IP. Refusing is
-    // the point — the direct IP may be one the operator is deliberately keeping
-    // off this endpoint. With nothing configured there is nothing to be strict
-    // about, so the plain fallback stays.
-    if (config.proxyStrict && proxyUrl) {
-      throw new Error(`proxy required but failed (strictProxy): ${maskProxyUrl(proxyUrl)} — ${err?.message ?? err}`)
-    }
-    if (!tlsWarned) {
-      tlsWarned = true
-      log(`⚠  TLS transport unavailable (${err?.message ?? err}) — falling back to native fetch,`)
-      log("   which the free tier refuses with 429 unless a Zen key is configured.")
-    }
-    return fetch(url, init)
-  }
+  // There is exactly one transport. If the addon will not load or a session
+  // cannot be created, this throws — it must never fall back to Node's TLS,
+  // whose ClientHello is precisely what the free tier answers with
+  // 429 FreeUsageLimitError. A silent downgrade turned one slow request into a
+  // permanent "the whole proxy is on the wrong TLS stack" state.
+  const session = await tlsSessionGet(proxyUrl)
+  return sessionFetch(session, url, init)
 }
 
 export {
@@ -261,7 +255,6 @@ export {
   DIRECT_KEY,
   MAX_TLS_SESSIONS,
   tlsSessions,
-  tlsWarned,
   proxyKey,
   maskProxyUrl,
   proxyCursor,

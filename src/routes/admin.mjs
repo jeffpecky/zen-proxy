@@ -143,7 +143,6 @@ async function handleApiConfig(req, res) {
       cleaned.autoSync = toBool(cleaned.autoSync, config.autoSync)
       cleaned.autoUA = toBool(cleaned.autoUA, config.autoUA)
       cleaned.injectSession = toBool(cleaned.injectSession, config.injectSession)
-      cleaned.proxyStrict = toBool(cleaned.proxyStrict, config.proxyStrict)
       if (!Array.isArray(cleaned.proxyUrls)) cleaned.proxyUrls = config.proxyUrls
       else cleaned.proxyUrls = cleaned.proxyUrls.filter((u) => typeof u === "string" && u.trim())
       if (cleaned.probeAuth != null && !["auto", "key", "anonymous"].includes(String(cleaned.probeAuth))) {

@@ -481,9 +481,6 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
       <textarea id="cfgResponses"></textarea>
       <label>Egress proxies (json array — round-robin, 429 steps to the next exit IP)</label>
       <textarea id="cfgProxies" placeholder='["http://127.0.0.1:8001"]'></textarea>
-      <div class="row">
-        <label style="display:flex;align-items:center;gap:8px"><input id="cfgProxyStrict" type="checkbox"> Strict: refuse rather than fall back to the direct IP when a proxy fails</label>
-      </div>
       <div class="row" style="margin-top:22px">
         <button class="primary" onclick="saveConfig()">Save &amp; apply</button>
         <button onclick="reloadConfig()">Discard / reload</button>
@@ -814,7 +811,6 @@ async function populateConfigForm() {
   $("cfgRateWindow").value = config.rateLimitWindowMs ?? 60000
   $("cfgResponses").value = JSON.stringify(config.responsesModels ?? [], null, 2)
   $("cfgProxies").value = JSON.stringify(config.proxyUrls ?? [], null, 2)
-  $("cfgProxyStrict").checked = !!config.proxyStrict
   try {
     const st = await api("/api/status")
     const auth = st.auth || {}
@@ -850,7 +846,6 @@ async function saveConfig() {
   }
   try { body.responsesModels = JSON.parse($("cfgResponses").value || "[]") } catch { toast("Invalid JSON — responses models", "bad"); return }
   try { body.proxyUrls = JSON.parse($("cfgProxies").value || "[]") } catch { toast("Invalid JSON — egress proxies", "bad"); return }
-  body.proxyStrict = $("cfgProxyStrict").checked
   if ($("cfgZenKey").value !== savedZenKeyMasked) body.defaultZenKey = $("cfgZenKey").value
   try {
     await api("/api/config", { method: "PUT", body: JSON.stringify(body) })

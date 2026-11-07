@@ -8,6 +8,19 @@ for [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **wreq-js is the only upstream transport.** The native-fetch fallback is gone:
+  if the addon cannot load, upstream calls fail with its error instead of
+  silently dropping to Node's TLS — which the free-tier gate answers with
+  `429 FreeUsageLimitError`. Previously *any* error (a timeout included)
+  triggered that downgrade and logged it as "TLS transport unavailable", so one
+  slow request could leave the whole proxy on the wrong TLS stack with the real
+  error hidden.
+- **`proxyStrict` / `PROXY_STRICT` removed** — it only ever governed that
+  fallback, so it has nothing left to control.
+- **The dashboard ships the password `123456`**, matching 9router's
+  `INITIAL_PASSWORD`. On any non-loopback bind it is replaced at boot with a
+  random one and the log says so, because a published dashboard must not be
+  openable with the value printed in the README. `ADMIN_PASSWORD` still wins.
 - **A client API key is now always required on model calls.** Every install
   mints an `sk-…` key at first boot (loopback included) and prints it once;
   Settings shows it masked under User-agent with an eye toggle and **Copy key**.

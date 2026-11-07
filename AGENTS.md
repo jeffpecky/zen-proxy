@@ -142,6 +142,5 @@ Deliberately different (do not "fix" these without a reason):
 | Env | Config key | Meaning |
 |---|---|---|
 | `PROXY_URLS` | `proxyUrls` | JSON array of egress proxies, round-robin |
-| `PROXY_STRICT=1` | `proxyStrict` | refuse instead of falling back to the direct IP |
-| `ZEN_TLS=0` | — | disable the wreq transport (BYOK / tests) |
+| `ZEN_TLS=0` | — | disable the wreq transport (tests only: the suite stubs `globalThis.fetch`) |
 | `ZEN_PROXY_WREQ` | — | explicit path to the wreq-js module |

@@ -21,6 +21,11 @@ const UI_PATH = path.join(__dirname, "public", "index.html")
 // The default mirrors Anthropic's own 32MB guidance; `maxBodyBytes` overrides it.
 const MAX_BODY = 32 * 1024 * 1024
 
+// The dashboard password a fresh install starts with, matching 9router's
+// INITIAL_PASSWORD default. Known by anyone who reads the README, so it is a
+// convenience for loopback only; a non-loopback bind replaces it at boot.
+const DEFAULT_ADMIN_PASSWORD = "123456"
+
 
 const DEFAULT_CONFIG = {
   host: ENV.HOST ?? "127.0.0.1",
@@ -71,7 +76,13 @@ const DEFAULT_CONFIG = {
   rateLimitWindowMs: envNum("RATE_LIMIT_WINDOW_MS", 60_000),
   // Dashboard login. NOT a client credential: `sk-…` keys in `apiKeys` are
   // for model calls only (see src/apikeys.mjs).
-  adminPassword: ENV.ADMIN_PASSWORD ?? "",
+  //
+  // Default is the same literal 9router ships (INITIAL_PASSWORD=123456), so a
+  // first-time operator can log in without hunting the boot log. It is only
+  // accepted on a loopback bind — a public one mints a random password instead
+  // and flags this default as unset (see ensureDefaultKey), because a published
+  // dashboard with a known password is not a login.
+  adminPassword: ENV.ADMIN_PASSWORD ?? DEFAULT_ADMIN_PASSWORD,
   // Minted per-caller keys (see src/apikeys.mjs). Only the SHA-256 of each key
   // is stored, so a leaked config file carries no usable credential.
   apiKeys: [],
@@ -86,7 +97,6 @@ const DEFAULT_CONFIG = {
   // silently replay the request over this machine's real IP — leaking the
   // address the proxy exists to hide, and burning its bucket. Strict means
   // refuse instead; it only bites when a proxy was actually configured.
-  proxyStrict: ENV.PROXY_STRICT === "1",
   trustForwarded: ENV.TRUST_FORWARDED === "1",
   timeoutMs: envNum("TIMEOUT_MS", 120000),
   // The shipped values must match what the docs promise: a 30s model cache and
@@ -254,6 +264,7 @@ export {
   CONFIG_PATH,
   UI_PATH,
   MAX_BODY,
+  DEFAULT_ADMIN_PASSWORD,
   DEFAULT_CONFIG,
   fallbackModelsPinned,
   setFallbackModelsPinned,

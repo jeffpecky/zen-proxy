@@ -68,17 +68,22 @@ server.listen(config.port, config.host, () => {
 
   // The gate fingerprints the TLS stack, and the proxy no longer depends on
   // the runtime for it: wreq-js dials with Bun's ClientHello either way. Say
-  // which transport this process actually got, once, at boot.
+  // which transport this process actually got, once, at boot. There is no
+  // second transport to fall back to, so a load failure is fatal to every
+  // upstream call and must read that way rather than as a warning.
   if (!TLS_ENABLED) {
-    log("TLS transport disabled (ZEN_TLS=0) — free-tier requests will be")
-    log("refused with 429 unless a Zen key is configured.")
+    log("TLS transport disabled (ZEN_TLS=0) — a test-only mode: free-tier requests")
+    log("will be refused with 429 unless a Zen key is configured.")
   } else {
     loadWreq()
       .then(() => log("TLS transport: wreq-js (Bun ClientHello profile)"))
-      .catch((err) => log(`⚠  ${err.message}`))
+      .catch((err) => {
+        log(`✗  ${err.message}`)
+        log("   there is no fallback transport: every upstream call will fail until it loads")
+      })
     const list = proxyList()
     if (list.length) {
-      log(`egress: ${list.length} proxy${list.length === 1 ? "" : " list"}${config.proxyStrict ? " (strict)" : ""} — ${list.map(maskProxyUrl).join(", ")}`)
+      log(`egress: ${list.length} proxy${list.length === 1 ? "" : " list"} — ${list.map(maskProxyUrl).join(", ")}`)
       // A 429 rotates the session and re-dials, but a single exit IP is a
       // single bucket: re-dialling it lands on the same one. Say it once
       // rather than letting "rotation" imply more than it delivers.
@@ -102,8 +107,9 @@ server.listen(config.port, config.host, () => {
 
   // Every install gets a client key at boot: it is what the dashboard shows and
   // copies, and a loopback box that minted none would render an empty field.
-  // The admin password is minted only when the proxy is reachable off this
-  // machine — a loopback install already has an open dashboard by design.
+  // The dashboard password stays at the shipped default (`123456`) on loopback;
+  // a bind reachable off this machine replaces it with a random one, so a
+  // published dashboard is never openable with the README's value.
   const minted = ensureDefaultKey()
   if (minted) {
     if (minted.key) {
@@ -111,8 +117,12 @@ server.listen(config.port, config.host, () => {
       log(`   client api key:     ${minted.key}   (ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY for model calls)`)
     }
     if (minted.adminPassword) {
-      log("no dashboard password and this proxy is reachable off this machine")
-      log(`   dashboard password: ${minted.adminPassword}   (Settings → change it; this is the login only)`)
+      log(
+        minted.replacedDefault
+          ? `dashboard password was the shipped default on a non-loopback bind — replaced with: ${minted.adminPassword}`
+          : `dashboard password minted: ${minted.adminPassword}`,
+      )
+      log("   Settings → change it; this is the login only")
     }
     if (minted.key && minted.adminPassword) log("   they are separate: the password never calls models, the key never logs in")
   }

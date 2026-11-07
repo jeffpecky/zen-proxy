@@ -26,6 +26,7 @@ export {
   listApiKeys,
   resolveApiKey,
   ensureDefaultKey,
+  dashboardAuthRequired,
   hashKey,
   KEY_RE,
 } from "./apikeys.mjs"

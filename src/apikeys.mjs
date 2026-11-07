@@ -14,7 +14,7 @@
 //
 // Stored shape: { id, name, hash, createdAt, lastUsedAt }
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
-import { config, saveConfig } from "./config.mjs"
+import { DEFAULT_ADMIN_PASSWORD, config, saveConfig } from "./config.mjs"
 
 const KEY_PREFIX = "sk-"
 const KEY_BYTES = 32
@@ -107,17 +107,16 @@ function loopbackBind() {
 }
 
 /**
- * Does the DASHBOARD need a password? Only when one is set or the proxy is
- * reachable off this machine. A loopback dashboard stays open on purpose: it is
- * where the operator reads and copies the API key, and losing that behind a
- * generated password would be a worse first run than an open port on localhost.
+ * Does the DASHBOARD need a password? Yes whenever one is set — and one always
+ * is now, since the config ships `123456` as 9router does. Clearing the field in
+ * Settings is the only way to turn the login off, which is an explicit choice on
+ * a loopback box.
  *
- * (Model calls have no such rule: a client key is always required — see
+ * (Model calls have their own rule: a client key is always required — see
  * authForUpstream().)
  */
 export function dashboardAuthRequired() {
-  if (config.adminPassword) return true
-  return !loopbackBind()
+  return Boolean(config.adminPassword)
 }
 
 /**
@@ -144,10 +143,17 @@ export function dashboardAuthRequired() {
  */
 export function ensureDefaultKey() {
   const out = {}
-  if (!config.adminPassword && !loopbackBind()) {
+  // The shipped default password (`123456`, as 9router's INITIAL_PASSWORD) is a
+  // known string. Fine on loopback; on any other bind it is replaced with a
+  // random one at boot, so a published dashboard is never openable with the
+  // value printed in the README. `mintedDefaultPassword` tells the boot log to
+  // say so.
+  const usesShippedDefault = !config.adminPassword || config.adminPassword === DEFAULT_ADMIN_PASSWORD
+  if (usesShippedDefault && !loopbackBind()) {
     // A password, not an API key: no `sk-` prefix, and never resolved by
     // resolveApiKey() — a bare random string can only open the dashboard.
     out.adminPassword = randomBytes(18).toString("base64url")
+    out.replacedDefault = Boolean(config.adminPassword)
     saveConfig({ adminPassword: out.adminPassword })
   }
   if (!config.apiKeys.length) {
